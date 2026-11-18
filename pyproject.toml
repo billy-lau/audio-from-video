@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "audio-from-video"
+version = "0.1.0"
+description = "Extract high-fidelity MP3 audio from video files with verified metadata, ID3v2.3 tags, and clean cross-platform naming."
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["audio", "video", "mp3", "ffmpeg", "id3", "musicbrainz", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Multimedia :: Sound/Audio :: Conversion",
+]
+# Note: mutagen is licensed under GPL-2.0-or-later (compatible with MIT source,
+# like beets). Any future bundled standalone executable distributing mutagen
+# must comply with GPL-2.0-or-later terms.
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "mutagen>=1.47,<2.0",
+    "pillow>=10.0,<14.0",
+    "platformdirs>=4.0,<5.0",
+    "rapidfuzz>=3.0,<4.0",
+    "rich>=13.0,<16.0",
+    "typer>=0.12,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<10.0",
+    "ruff>=0.8,<1.0",
+]
+
+[project.scripts]
+afv = "audio_from_video.cli.main:main"
+audio-from-video = "audio_from_video.cli.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audio_from_video"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra"]
