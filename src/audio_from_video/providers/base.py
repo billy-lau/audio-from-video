@@ -121,9 +121,12 @@ class HttpFetcher:
         wall_clock: Callable[[], float] = time.time,
         jitter: Callable[[], float] = random.random,
         timeout: float = 20.0,
+        connect_timeout: float = 5.0,
     ) -> None:
         self._client = client or httpx.Client(
-            transport=transport, timeout=timeout, follow_redirects=True
+            transport=transport,
+            timeout=httpx.Timeout(timeout, connect=min(timeout, connect_timeout)),
+            follow_redirects=True,
         )
         self.limiter = limiter or RateLimiter(0.0)
         self._headers = dict(headers or {})
@@ -204,6 +207,10 @@ class HttpFetcher:
                 last_error = f"{type(exc).__name__}: {exc}"
                 response = None
                 transport_failures += 1
+                # A connect timeout usually means a blackholed route; retrying only doubles
+                # the stall, so give up on the first one and let the circuit breaker decide.
+                if isinstance(exc, httpx.ConnectTimeout):
+                    break
                 if transport_failures > self.transport_max_retries:
                     break
             except httpx.HTTPError as exc:

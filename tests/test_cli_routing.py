@@ -101,20 +101,22 @@ def test_cli_validation_guardrails_exit_code_2(tmp_path: Path, monkeypatch: obje
     res_j = runner.invoke(app, ["--offline", "-j", "0", str(f1)])
     assert res_j.exit_code == 2
 
-    # 3. --normalize (scheduled for Phase 3)
-    res_norm = runner.invoke(app, ["--offline", "--normalize", str(f1)])
-    assert res_norm.exit_code == 2
+    # 3. --normalize is enabled in Phase 3 (dry-run succeeds and displays +norm).
+    res_norm = runner.invoke(app, ["--offline", "--normalize", "--dry-run", str(f1)])
+    assert res_norm.exit_code == 0, res_norm.output
+    assert "+norm" in res_norm.output
 
     # 4. --always-prompt on non-TTY / --non-interactive
     res_prompt = runner.invoke(app, ["--offline", "--always-prompt", "--non-interactive", str(f1)])
     assert res_prompt.exit_code == 2
 
-    # 5. Online mode without --offline gives the Phase 1 message FIRST (no double dead-end!).
+    # 5. Online mode without MusicBrainz contact in non-TTY exits with code 2.
     monkeypatch.delenv("AFV_MB_CONTACT", raising=False)  # type: ignore[attr-defined]
     monkeypatch.delenv("AFV_MB_USER_AGENT", raising=False)  # type: ignore[attr-defined]
     monkeypatch.setenv("AFV_CONFIG_PATH", str(tmp_path / "empty.toml"))  # type: ignore[attr-defined]
     res_online = runner.invoke(app, [str(f1)])
     assert res_online.exit_code == 2
+    assert "AFV_MB_CONTACT" in res_online.output
     assert "--offline" in res_online.output
     assert "afv config init" not in res_online.output
 

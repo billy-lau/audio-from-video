@@ -11,7 +11,7 @@ import contextlib
 import logging
 import threading
 from collections import Counter
-from collections.abc import Hashable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ from audio_from_video.models import (
     MatchDecision,
     MatchStatus,
     ParsedHints,
+    ReleaseRef,
     TrackMetadata,
 )
 from audio_from_video.offline_metadata import build_offline_metadata
@@ -271,6 +272,13 @@ class TrackResolver:
             return False
         with self._breaker_lock:
             return provider in self._tripped_providers
+
+    @property
+    def providers_unavailable(self) -> bool:
+        """True when every configured provider's circuit breaker has tripped in this run."""
+        if not self._is_provider_tripped("musicbrainz"):
+            return False
+        return self.itunes is None or self._is_provider_tripped("itunes")
 
     def _record_provider_success(self, provider: str) -> None:
         if self._breaker_threshold <= 0:
@@ -778,7 +786,12 @@ class TrackResolver:
             g.warnings.append(f"Online lookup failed: {exc}")
             return g
 
-    def resolve_batch(self, items: Sequence[BatchItem]) -> list[MatchResult]:
+    def resolve_batch(
+        self,
+        items: Sequence[BatchItem],
+        *,
+        on_progress: Callable[[int, int, str], None] | None = None,
+    ) -> list[MatchResult]:
         """Two-pass batch resolution preferring each folder's dominant release group.
 
         Processes ungrouped tracks singly and each multi-track folder one group at a time
@@ -786,6 +799,18 @@ class TrackResolver:
         """
         if not items:
             return []
+        total = len(items)
+        completed = 0
+
+        def _label(item: BatchItem) -> str:
+            if item.source_path is not None:
+                return item.source_path.name
+            return item.hints.title or item.hints.clean_stem or "track"
+
+        def _notify(done: int, label: str) -> None:
+            if on_progress is not None:
+                on_progress(done, total, label)
+
         groups: dict[Hashable, list[int]] = {}
         for idx, item in enumerate(items):
             key = (
@@ -796,7 +821,7 @@ class TrackResolver:
             if key is not None:
                 groups.setdefault(key, []).append(idx)
 
-        results: list[MatchResult | None] = [None] * len(items)
+        results: list[MatchResult | None] = [None] * total
         handled_groups: set[Hashable] = set()
         index_to_group: dict[int, Hashable] = {
             i: key for key, idxs in groups.items() if len(idxs) >= 2 for i in idxs
@@ -807,15 +832,22 @@ class TrackResolver:
                 continue
             group_key = index_to_group.get(idx)
             if group_key is None:
+                label = _label(item)
+                _notify(completed, label)
                 g = self._gather_safe(item)
                 res = self.decide(g)
                 results[idx] = self._finalize(res, g.overrides, disc_hint=g.hints.disc_number)
+                completed += 1
+                _notify(completed, label)
                 continue
             if group_key in handled_groups:
                 continue
             handled_groups.add(group_key)
             indices = groups[group_key]
-            group_gathered = [self._gather_safe(items[i]) for i in indices]
+            group_gathered: list[_Gathered] = []
+            for i in indices:
+                _notify(completed, _label(items[i]))
+                group_gathered.append(self._gather_safe(items[i]))
             group_first = [self.decide(g) for g in group_gathered]
             counts = Counter(
                 r.best.release_group_id
@@ -839,7 +871,80 @@ class TrackResolver:
                     if not (flags & {"live", "remix"}):
                         res = self.decide(g, dominant)
                 results[i] = self._finalize(res, g.overrides, disc_hint=g.hints.disc_number)
+                completed += 1
+                _notify(completed, _label(items[i]))
         return [r for r in results if r is not None]
+
+    def manual_search(
+        self,
+        *,
+        title: str,
+        artist: str | None = None,
+        album: str | None = None,
+        duration_seconds: float | None = None,
+    ) -> MatchResult:
+        """Run an interactive manual search returning ranked candidates without auto-enrichment."""
+        clean_title = title.strip()
+        clean_artist = artist.strip() if artist and artist.strip() else None
+        clean_album = album.strip() if album and album.strip() else None
+        hints = ParsedHints(
+            artist=clean_artist,
+            title=clean_title or None,
+            album=clean_album,
+            trusted_artist=bool(clean_artist),
+            trusted_title=bool(clean_title),
+            is_hintless=not bool(clean_title),
+            clean_stem=clean_title,
+        )
+        try:
+            gathered = self.gather(hints, duration_seconds, NO_OVERRIDES)
+            return self.decide(gathered)
+        except Exception as exc:
+            logger.debug("Manual search failure", exc_info=True)
+            fallback = _Gathered(hints=hints, overrides=NO_OVERRIDES, skipped=False)
+            return self._empty_result(
+                fallback, MatchDecision.UNMATCHED, [f"Manual search failed: {exc}"]
+            )
+
+    @staticmethod
+    def official_editions(
+        candidate: Candidate,
+        *,
+        disc_hint: int | None = None,
+    ) -> list[ReleaseRef]:
+        """Return deduplicated official editions ordered by the standard-original tie-breaker."""
+        seen: set[str] = set()
+        unique: list[ReleaseRef] = []
+        for ref in candidate.releases:
+            if ref.release_id and ref.release_id not in seen:
+                seen.add(ref.release_id)
+                unique.append(ref)
+        if candidate.chosen_release and candidate.chosen_release.release_id not in seen:
+            unique.append(candidate.chosen_release)
+        official = [r for r in unique if (r.status or "").lower() == "official"]
+        pool = official or unique
+        return sorted(
+            pool,
+            key=lambda r: edition_sort_key(r, rg_title=candidate.album, disc_hint=disc_hint),
+        )
+
+    def enrich_candidate(
+        self,
+        candidate: Candidate,
+        *,
+        overrides: ManualOverrides | None = None,
+        warnings: list[str] | None = None,
+        disc_hint: int | None = None,
+        allow_edition_recheck: bool = True,
+    ) -> tuple[TrackMetadata, Candidate]:
+        """Enrich a user-selected candidate and pin any manual overrides verbatim."""
+        meta, chosen = self._enrich_with_candidate(
+            candidate,
+            warnings=warnings,
+            disc_hint=disc_hint,
+            allow_edition_recheck=allow_edition_recheck,
+        )
+        return apply_overrides_to_metadata(meta, overrides or NO_OVERRIDES), chosen
 
     # -- Enrichment -------------------------------------------------------------------
 
@@ -872,12 +977,18 @@ class TrackResolver:
         *,
         warnings: list[str] | None = None,
         disc_hint: int | None = None,
+        allow_edition_recheck: bool = True,
     ) -> tuple[TrackMetadata, Candidate]:
         warn = warnings if warnings is not None else []
         try:
             if candidate.source != "musicbrainz":
                 return self._basic_metadata(candidate), candidate
-            return self._enrich_mb(candidate, warn, disc_hint=disc_hint)
+            return self._enrich_mb(
+                candidate,
+                warn,
+                disc_hint=disc_hint,
+                allow_edition_recheck=allow_edition_recheck,
+            )
         except Exception as exc:
             warn.append(f"Metadata enrichment failed: {_brief_error(exc)}")
             logger.debug("Enrichment failure", exc_info=True)
@@ -982,6 +1093,7 @@ class TrackResolver:
         warn: list[str],
         *,
         disc_hint: int | None = None,
+        allow_edition_recheck: bool = True,
     ) -> tuple[TrackMetadata, Candidate]:
         release: dict[str, Any] | None = None
         if candidate.release_id:
@@ -992,9 +1104,10 @@ class TrackResolver:
                 candidate.release_id,
                 provider="musicbrainz",
             )
-            candidate, release = self._recheck_edition(
-                candidate, release, warn, disc_hint=disc_hint
-            )
+            if allow_edition_recheck:
+                candidate, release = self._recheck_edition(
+                    candidate, release, warn, disc_hint=disc_hint
+                )
         meta = self._basic_metadata(candidate)
 
         album_artist_id: str | None = candidate.artist_id

@@ -21,6 +21,7 @@ class PlanAction(StrEnum):
     EXTRACT = "extract"
     SKIP_EXISTING = "skip_existing"
     SKIP_NO_AUDIO = "skip_no_audio"
+    SKIP_USER = "skip_user"
     FAIL_NO_AUDIO = "fail_no_audio"
     FAIL_ERROR = "fail_error"
 
@@ -226,6 +227,19 @@ class ManualOverrides:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalizationResult:
+    """Two-pass linear-first loudnorm measurement and application metrics."""
+
+    target_i: float
+    effective_i: float | None
+    gain_db: float | None
+    normalization_type: str
+    input_i: float | None = None
+    input_tp: float | None = None
+    input_lra: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ExtractionPlan:
     """Resolved FFmpeg extraction parameters for one track."""
 
@@ -234,8 +248,14 @@ class ExtractionPlan:
     quality: QualitySpec
     target_sample_rate: int | None = None
     target_channels: int | None = None
+    source_channels: int | None = None
     effective_bitrate_kbps: int | None = None
     clamped_from_kbps: int | None = None
+    normalize: bool = False
+    loudnorm_mode: str = "linear"
+    loudnorm_i: float = -16.0
+    loudnorm_tp: float = -1.0
+    loudnorm_lra: float = 11.0
     warnings: list[str] = field(default_factory=list)
 
 
@@ -252,6 +272,9 @@ class PlanItem:
     extraction: ExtractionPlan | None = None
     output_path: Path | None = None
     artwork_bytes: bytes | None = None
+    candidate: Candidate | None = None
+    top_candidates: list[Candidate] = field(default_factory=list)
+    match_decision: MatchDecision | None = None
     warnings: list[str] = field(default_factory=list)
     error: str | None = None
     conflict_note: str | None = None
@@ -268,6 +291,8 @@ class TrackResult:
     error: str | None = None
     elapsed_seconds: float = 0.0
     stream_copied: bool = False
+    artwork_source: str | None = None
+    normalization: NormalizationResult | None = None
 
 
 @dataclass(slots=True)

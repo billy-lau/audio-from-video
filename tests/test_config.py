@@ -15,6 +15,7 @@ from audio_from_video.config import (
     load_config,
     parse_quality,
     resolve_mb_user_agent,
+    save_mb_contact,
     validate_jobs,
     validate_mb_contact,
     validate_mb_user_agent,
@@ -227,3 +228,66 @@ def test_log_file_writes_plain_utf8_without_ansi(tmp_path: Path) -> None:
     assert "Warning line" in content
     assert "[DEBUG]" in content
     assert not _ANSI_RE.search(content)
+
+
+def test_save_mb_contact_creates_updates_and_preserves_other_sections(tmp_path: Path) -> None:
+    cfg_path = tmp_path / "sub" / "config.toml"
+
+    # 1. Creates new config.toml cleanly.
+    saved = save_mb_contact("relay@duck.com", config_path=cfg_path)
+    assert saved == cfg_path
+    cfg = load_config(config_path=cfg_path, env={})
+    assert cfg.musicbrainz.contact == "relay@duck.com"
+
+    # 2. Preserves existing sections and comments when updating or inserting contact.
+    cfg_path.write_text(
+        "# User settings\n"
+        "[audio]\n"
+        'quality = "v0"\n'
+        "\n"
+        "[musicbrainz]\n"
+        "# Existing comment\n"
+        'contact = "old@duck.com"\n'
+        "\n"
+        "[output]\n"
+        "flat = true\n",
+        encoding="utf-8",
+    )
+    save_mb_contact("https://github.com/org/audio-from-video", config_path=cfg_path)
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "# User settings" in text
+    assert "# Existing comment" in text
+    reloaded = load_config(config_path=cfg_path, env={})
+    assert reloaded.audio.quality == "v0"
+    assert reloaded.output.flat is True
+    assert reloaded.musicbrainz.contact == "https://github.com/org/audio-from-video"
+
+    # 3. Appends [musicbrainz] when absent without touching existing sections.
+    no_mb_path = tmp_path / "no_mb.toml"
+    no_mb_path.write_text('[audio]\nquality = "256k"\n', encoding="utf-8")
+    save_mb_contact("alias@simplelogin.com", config_path=no_mb_path)
+    reloaded_2 = load_config(config_path=no_mb_path, env={})
+    assert reloaded_2.audio.quality == "256k"
+    assert reloaded_2.musicbrainz.contact == "alias@simplelogin.com"
+
+    # 4. Rejects placeholder contact without creating or modifying file.
+    with pytest.raises(ConfigError):
+        save_mb_contact("user@example.com", config_path=tmp_path / "rejected.toml")
+    assert not (tmp_path / "rejected.toml").exists()
+
+
+def test_loudnorm_config_range_validation(tmp_path: Path) -> None:
+    bad_i = tmp_path / "bad_i.toml"
+    bad_i.write_text("[audio]\nloudnorm_i = -2.0\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(config_path=bad_i, env={})
+
+    bad_tp = tmp_path / "bad_tp.toml"
+    bad_tp.write_text("[audio]\nloudnorm_tp = 1.0\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(config_path=bad_tp, env={})
+
+    bad_lra = tmp_path / "bad_lra.toml"
+    bad_lra.write_text("[audio]\nloudnorm_lra = 0.0\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_config(config_path=bad_lra, env={})

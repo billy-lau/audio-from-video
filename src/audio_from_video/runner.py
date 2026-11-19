@@ -1,4 +1,4 @@
-"""Stage 2 parallel execution, SIGINT cleanup, verification, and atomic rename."""
+"""Stage 2 parallel execution, artwork fetching, SIGINT cleanup, verification, and rename."""
 
 from __future__ import annotations
 
@@ -13,13 +13,19 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_c
 from pathlib import Path
 from types import FrameType
 
+from audio_from_video.artwork import ArtworkFetcher
 from audio_from_video.extractor import (
     ExtractionError,
     ProcessRegistry,
     make_part_path,
     run_ffmpeg,
 )
-from audio_from_video.formatting import build_relative_path
+from audio_from_video.formatting import (
+    build_relative_path,
+    compute_relative_path_budget,
+    find_case_insensitive_conflict,
+    utf16_len,
+)
 from audio_from_video.models import (
     ConflictPolicy,
     MatchStatus,
@@ -42,24 +48,45 @@ def _unlink_quiet(path: Path) -> None:
         pass
 
 
+def _find_existing_conflict(output_root: Path, candidate: Path) -> Path | None:
+    """Check case-insensitively (NFC + os.scandir) whether candidate collides on disk."""
+    try:
+        rel = candidate.relative_to(output_root)
+    except ValueError:
+        return candidate if candidate.exists() else None
+    return find_case_insensitive_conflict(output_root, rel)
+
+
 def _next_available_rename_path(
     item: PlanItem,
     *,
     output_root: Path,
     flat: bool,
+    max_rel_utf16: int,
+    preferred_parent: Path | None = None,
 ) -> Path:
     """Compute a non-colliding path if a TOCTOU race created the target mid-run."""
     assert item.metadata is not None
     index = 2
     while True:
+        suffix = f" ({index})"
         rel = build_relative_path(
             item.metadata,
             original_stem=item.media_input.path.stem,
             flat=flat,
-            suffix=f" ({index})",
+            suffix=suffix,
+            max_rel_utf16=max_rel_utf16,
         )
+        if preferred_parent is not None and not flat:
+            try:
+                rel_parent = preferred_parent.relative_to(output_root)
+                candidate_rel = rel_parent / rel.name
+                if utf16_len(candidate_rel.as_posix()) <= max_rel_utf16:
+                    rel = candidate_rel
+            except ValueError:
+                pass
         candidate = output_root / rel
-        if not candidate.exists():
+        if _find_existing_conflict(output_root, candidate) is None:
             return candidate
         index += 1
 
@@ -74,11 +101,13 @@ def _execute_single_item(
     no_artwork: bool,
     registry: ProcessRegistry,
     replace_lock: threading.Lock,
+    artwork_fetcher: ArtworkFetcher | None = None,
+    max_rel_utf16: int | None = None,
 ) -> TrackResult:
-    """Run extraction, fresh ID3v2.3 tagging, verification, and atomic rename for one item."""
+    """Run extraction, artwork fetch, fresh ID3v2.3 tagging, verification, and atomic rename."""
     started = time.monotonic()
 
-    if item.action == PlanAction.SKIP_EXISTING:
+    if item.action in (PlanAction.SKIP_EXISTING, PlanAction.SKIP_USER):
         return TrackResult(
             item=item,
             outcome=RunOutcome.SKIPPED,
@@ -111,6 +140,9 @@ def _execute_single_item(
     dest_path = item.output_path
     dest_dir = dest_path.parent
     warnings = list(item.warnings)
+    rel_budget = (
+        max_rel_utf16 if max_rel_utf16 is not None else compute_relative_path_budget(output_root)[0]
+    )
 
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -128,15 +160,31 @@ def _execute_single_item(
     registry.track_part(part_path)
 
     try:
-        run_ffmpeg(
+        norm_result = run_ffmpeg(
             ffmpeg_path,
             item.media_input.path,
             part_path,
             item.extraction,
             registry=registry,
+            warnings_out=warnings,
         )
 
-        art_payload = None if no_artwork else item.artwork_bytes
+        art_payload: bytes | None = None
+        art_source: str | None = None
+        if not no_artwork:
+            if item.artwork_bytes:
+                art_payload = item.artwork_bytes
+                art_source = "embedded"
+            elif artwork_fetcher is not None and item.candidate is not None:
+                if registry.is_interrupted:
+                    raise InterruptedError("Interrupted before artwork fetch.")
+                art_outcome = artwork_fetcher.fetch_for_candidate(item.candidate)
+                if art_outcome.data:
+                    art_payload = art_outcome.data
+                    art_source = art_outcome.source
+                if art_outcome.warning:
+                    warnings.append(art_outcome.warning)
+
         wrote_id3, tag_warnings = write_tags(part_path, item.metadata, artwork_bytes=art_payload)
         warnings.extend(tag_warnings)
 
@@ -145,27 +193,37 @@ def _execute_single_item(
         if registry.is_interrupted:
             raise InterruptedError("Interrupted before atomic rename.")
 
-        # Defensive TOCTOU check immediately before atomic os.replace().
+        # Defensive NFC case-insensitive TOCTOU check immediately before atomic os.replace().
         final_path = dest_path
         with replace_lock:
-            if final_path.exists():
+            existing_conflict = _find_existing_conflict(output_root, final_path)
+            if existing_conflict is not None:
                 if on_conflict == ConflictPolicy.SKIP:
                     _unlink_quiet(part_path)
                     registry.untrack_part(part_path)
                     warnings.append(
-                        f"Destination appeared concurrently ({final_path.name}); skipped."
+                        f"Destination appeared concurrently ({existing_conflict.name}); skipped."
                     )
                     return TrackResult(
                         item=item,
                         outcome=RunOutcome.SKIPPED,
-                        output_path=final_path,
+                        output_path=existing_conflict,
                         warnings=warnings,
                         elapsed_seconds=time.monotonic() - started,
+                        artwork_source=art_source,
+                        normalization=norm_result,
                     )
                 if on_conflict == ConflictPolicy.RENAME:
                     final_path = _next_available_rename_path(
-                        item, output_root=output_root, flat=flat
+                        item,
+                        output_root=output_root,
+                        flat=flat,
+                        max_rel_utf16=rel_budget,
+                        preferred_parent=dest_path.parent,
                     )
+                    final_path.parent.mkdir(parents=True, exist_ok=True)
+                elif on_conflict == ConflictPolicy.OVERWRITE:
+                    final_path = existing_conflict
                     final_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(part_path, final_path)
             registry.untrack_part(part_path)
@@ -182,6 +240,8 @@ def _execute_single_item(
             warnings=warnings,
             elapsed_seconds=time.monotonic() - started,
             stream_copied=item.extraction.stream_copy,
+            artwork_source=art_source,
+            normalization=norm_result,
         )
     except InterruptedError:
         _unlink_quiet(part_path)
@@ -211,15 +271,18 @@ def execute_plan(
     on_conflict: ConflictPolicy = ConflictPolicy.SKIP,
     no_artwork: bool = False,
     fail_fast: bool = False,
+    artwork_fetcher: ArtworkFetcher | None = None,
     registry: ProcessRegistry | None = None,
     on_result: Callable[[TrackResult, int, int], None] | None = None,
 ) -> RunSummary:
-    """Execute Stage 2 extraction and tagging in parallel with SIGINT/SIGTERM cleanup."""
+    """Execute Stage 2 extraction, artwork fetch, and tagging in parallel with SIGINT cleanup."""
     active_registry = registry if registry is not None else ProcessRegistry()
     summary = RunSummary(output_root=output_root)
     total = len(plan_items)
     if total == 0:
         return summary
+
+    rel_budget, _ = compute_relative_path_budget(output_root)
 
     # Install signal handlers only when invoked on the main thread.
     install_signals = threading.current_thread() is threading.main_thread()
@@ -243,14 +306,24 @@ def execute_plan(
     ordered_results: list[TrackResult | None] = [None] * total
     completed_count = 0
 
+    item_kwargs = {
+        "ffmpeg_path": ffmpeg_path,
+        "output_root": output_root,
+        "flat": flat,
+        "on_conflict": on_conflict,
+        "no_artwork": no_artwork,
+        "registry": active_registry,
+        "replace_lock": replace_lock,
+        "artwork_fetcher": artwork_fetcher,
+        "max_rel_utf16": rel_budget,
+    }
+
     try:
         max_workers = max(1, jobs)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             pending: dict[Future[TrackResult], int] = {}
 
             if fail_fast:
-                # Keep up to max_workers jobs running concurrently in a sliding window;
-                # stop submitting new items and cancel queued futures on the first failure.
                 next_idx = 0
                 failed_seen = False
 
@@ -271,19 +344,8 @@ def execute_plan(
                         idx = next_idx
                         next_idx += 1
 
-                        # Pre-planned failures trigger fail-fast immediately before starting
-                        # subsequent items.
                         if item.action in (PlanAction.FAIL_NO_AUDIO, PlanAction.FAIL_ERROR):
-                            res = _execute_single_item(
-                                item,
-                                ffmpeg_path=ffmpeg_path,
-                                output_root=output_root,
-                                flat=flat,
-                                on_conflict=on_conflict,
-                                no_artwork=no_artwork,
-                                registry=active_registry,
-                                replace_lock=replace_lock,
-                            )
+                            res = _execute_single_item(item, **item_kwargs)
                             ordered_results[idx] = res
                             completed_count += 1
                             if on_result is not None:
@@ -291,17 +353,7 @@ def execute_plan(
                             failed_seen = True
                             break
 
-                        fut = executor.submit(
-                            _execute_single_item,
-                            item,
-                            ffmpeg_path=ffmpeg_path,
-                            output_root=output_root,
-                            flat=flat,
-                            on_conflict=on_conflict,
-                            no_artwork=no_artwork,
-                            registry=active_registry,
-                            replace_lock=replace_lock,
-                        )
+                        fut = executor.submit(_execute_single_item, item, **item_kwargs)
                         pending[fut] = idx
 
                     if not pending:
@@ -328,17 +380,7 @@ def execute_plan(
                 for idx, item in enumerate(plan_items):
                     if interrupted_flag.is_set() or active_registry.is_interrupted:
                         break
-                    fut = executor.submit(
-                        _execute_single_item,
-                        item,
-                        ffmpeg_path=ffmpeg_path,
-                        output_root=output_root,
-                        flat=flat,
-                        on_conflict=on_conflict,
-                        no_artwork=no_artwork,
-                        registry=active_registry,
-                        replace_lock=replace_lock,
-                    )
+                    fut = executor.submit(_execute_single_item, item, **item_kwargs)
                     pending[fut] = idx
 
                 for fut in as_completed(pending):
@@ -368,7 +410,7 @@ def execute_plan(
 
 
 def write_json_report(summary: RunSummary, report_path: Path) -> None:
-    """Write a structured JSON batch report to report_path."""
+    """Write a structured JSON batch report (including candidates, warnings, and loudnorm stats)."""
     payload = {
         "output_root": str(summary.output_root),
         "interrupted": summary.interrupted,
@@ -387,9 +429,26 @@ def write_json_report(summary: RunSummary, report_path: Path) -> None:
                 "outcome": res.outcome.value,
                 "output_path": str(res.output_path) if res.output_path else None,
                 "stream_copied": res.stream_copied,
+                "artwork_source": res.artwork_source,
                 "elapsed_seconds": round(res.elapsed_seconds, 3),
                 "warnings": res.warnings,
                 "error": res.error,
+                "match_decision": (
+                    res.item.match_decision.value if res.item.match_decision is not None else None
+                ),
+                "normalization": (
+                    {
+                        "target_i": res.normalization.target_i,
+                        "effective_i": res.normalization.effective_i,
+                        "gain_db": res.normalization.gain_db,
+                        "normalization_type": res.normalization.normalization_type,
+                        "input_i": res.normalization.input_i,
+                        "input_tp": res.normalization.input_tp,
+                        "input_lra": res.normalization.input_lra,
+                    }
+                    if res.normalization is not None
+                    else None
+                ),
                 "metadata": (
                     {
                         "artist": res.item.metadata.artist,
@@ -398,11 +457,36 @@ def write_json_report(summary: RunSummary, report_path: Path) -> None:
                         "album": res.item.metadata.album,
                         "album_artist": res.item.metadata.album_artist,
                         "track_number": res.item.metadata.track_number,
+                        "track_total": res.item.metadata.track_total,
+                        "disc_number": res.item.metadata.disc_number,
+                        "disc_total": res.item.metadata.disc_total,
+                        "date": res.item.metadata.date,
+                        "original_year": res.item.metadata.original_year,
+                        "genre": res.item.metadata.genre,
+                        "mb_recording_id": res.item.metadata.mb_recording_id,
+                        "mb_release_id": res.item.metadata.mb_release_id,
+                        "mb_artist_id": res.item.metadata.mb_artist_id,
+                        "mb_release_group_id": res.item.metadata.mb_release_group_id,
                         "match_status": res.item.metadata.match_status.value,
+                        "source_description": res.item.metadata.source_description,
                     }
                     if res.item.metadata is not None
                     else None
                 ),
+                "top_candidates": [
+                    {
+                        "source": cand.source,
+                        "artist": cand.artist,
+                        "title": cand.title,
+                        "album": cand.album,
+                        "release_date": cand.release_date or cand.release_group_date,
+                        "score": round(cand.score, 4),
+                        "recording_id": cand.recording_id,
+                        "release_id": cand.release_id,
+                        "release_group_id": cand.release_group_id,
+                    }
+                    for cand in res.item.top_candidates[:5]
+                ],
             }
             for res in summary.results
         ],

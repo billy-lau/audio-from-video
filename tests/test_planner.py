@@ -129,14 +129,19 @@ def test_offline_end_to_end_exact_partial_unmatched_and_downloader_safety(
     assert roxy_tags["TPE1"].text == ["Roxy Music"]
     assert str(roxy_tags["TYER"]) == "1982"
 
-    classical_mp3 = (
-        output_root
-        / "Berliner Philharmoniker"
-        / "Beethoven - Symphonies"
-        / "01 Berliner Philharmoniker - Symphony No. 5 - Allegro con brio.mp3"
+    # Tagged classical positive control stays trusted in its Artist/Album folder (Phase C may
+    # trim the filename stem when pytest's tmp_path is deep, while ID3 TIT2 remains verbatim).
+    classical_res = next(
+        r for r in summary.results if r.item.media_input.path.name == "classical.mp4"
     )
-    assert classical_mp3.is_file()
-    assert ID3(str(classical_mp3))["TPE1"].text == ["Berliner Philharmoniker"]
+    assert classical_res.output_path is not None and classical_res.output_path.is_file()
+    assert classical_res.output_path.parent == (
+        output_root / "Berliner Philharmoniker" / "Beethoven - Symphonies"
+    )
+    assert classical_res.output_path.name.startswith("01 Berliner Philharmoniker - Symphony No. 5")
+    classical_tags = ID3(str(classical_res.output_path))
+    assert classical_tags["TPE1"].text == ["Berliner Philharmoniker"]
+    assert classical_tags["TIT2"].text == ["Symphony No. 5 - Allegro con brio"]
 
     partial_mp3 = (
         output_root

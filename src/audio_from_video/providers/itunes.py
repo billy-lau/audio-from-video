@@ -53,6 +53,25 @@ def artwork_url_variants(artwork_url100: str | None) -> list[str]:
 
 
 _CREDIT_SPLIT_RE = re.compile(r",\s+|\s+&\s+")
+# iTunes retags evergreen tracks with seasonal genres (e.g., Jeff Buckley's "Hallelujah" on
+# Grace is "Holiday"), so only trust them when the album itself is a holiday release.
+_SEASONAL_GENRE_RE = re.compile(r"^\s*(?:holiday|christmas)\b", re.IGNORECASE)
+_HOLIDAY_ALBUM_RE = re.compile(
+    r"christmas|holiday|xmas|noel|noël|navidad|winter\s+wonderland|santa|advent|hanukkah",
+    re.IGNORECASE,
+)
+
+
+def clean_itunes_genre(genre: object, album: str | None) -> str | None:
+    """Return a usable iTunes genre, dropping seasonal genres on non-holiday albums."""
+    if not isinstance(genre, str) or not genre.strip():
+        return None
+    cleaned = genre.strip()
+    if _SEASONAL_GENRE_RE.match(cleaned) and not (album and _HOLIDAY_ALBUM_RE.search(album)):
+        return None
+    return cleaned
+
+
 _COMPILATION_RE = re.compile(
     r"best\s+of|greatest\s+hits|the\s+very\s+best|collection|anthology|essentials?\b|"
     r"definitive|ultimate|golden\s+hits|hits\s+of|\b\d+\s*in\s*1\b|"
@@ -163,7 +182,7 @@ def results_to_candidates(
                 disc_number=item.get("discNumber"),
                 disc_total=disc_count,
                 release_date=parsed_date,
-                genre=item.get("primaryGenreName"),
+                genre=clean_itunes_genre(item.get("primaryGenreName"), item.get("collectionName")),
                 artwork_url=item.get("artworkUrl100"),
                 search_rank=len(candidates),
             )
@@ -204,6 +223,7 @@ class ITunesClient:
         self._album_genres: dict[str, str | None] = {}
         self._album_artworks: dict[str, str | None] = {}
         self._memo_lock = threading.Lock()
+        self.memo_hits = 0
 
     @property
     def request_count(self) -> int:
@@ -224,6 +244,7 @@ class ITunesClient:
         with self._memo_lock:
             if key in self._memo:
                 self._memo.move_to_end(key)
+                self.memo_hits += 1
                 return self._memo[key]
         value: Any = MISSING
         if self.cache is not None:

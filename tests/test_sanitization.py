@@ -1,12 +1,22 @@
-"""Tests for Phase A per-field sanitization and Phase B component hardening."""
+"""Tests for Phase A sanitization, Phase B hardening, and Phase C path budget and case safety."""
 
 from __future__ import annotations
 
 import unicodedata
+from pathlib import Path
 
 import pytest
 
-from audio_from_video.formatting import harden_component, sanitize_field
+from audio_from_video.formatting import (
+    build_relative_path,
+    compute_relative_path_budget,
+    find_case_insensitive_conflict,
+    harden_component,
+    needs_english_alias,
+    sanitize_field,
+    utf16_len,
+)
+from audio_from_video.models import MatchStatus, TrackMetadata
 
 
 def test_phase_a_unicode_nfc_and_forbidden_replacements() -> None:
@@ -117,3 +127,131 @@ def test_phase_b_reserved_name_guard_respects_max_bytes() -> None:
     hardened = harden_component(name, max_bytes=200)
     assert hardened.startswith("CON_.")
     assert len(hardened.encode("utf-8")) <= 200
+
+
+def test_phase_c_utf16_len_and_relative_budget_formula() -> None:
+    # BMP characters = 1 UTF-16 unit; non-BMP emoji = 2 UTF-16 units (surrogate pair).
+    assert utf16_len("abc") == 3
+    assert utf16_len("張學友") == 3
+    assert utf16_len("🎵") == 2
+
+    # Short root caps at 180 with no warning.
+    budget_short, warn_short = compute_relative_path_budget(Path("/tmp/out"))
+    assert budget_short == 180
+    assert warn_short is None
+
+    # Medium root (100 chars): 240 - 100 - 1 = 139, no warning (< 180).
+    med_root = Path("/" + "a" * 99)
+    budget_med, warn_med = compute_relative_path_budget(med_root)
+    assert budget_med == 139
+    assert warn_med is None
+
+    # Long root (>= 180 UTF-16 units): floors at 60 and emits Windows MAX_PATH warning.
+    long_root = Path("/" + "a" * 185)
+    budget_long, warn_long = compute_relative_path_budget(long_root)
+    assert budget_long == 60
+    assert warn_long is not None
+    assert "-o/--output-dir" in warn_long
+
+
+def test_phase_c_shrink_priority_title_then_album_then_artist_and_suffix() -> None:
+    # 1. Only stem exceeds budget: album and artist stay completely intact.
+    meta_long_title = TrackMetadata(
+        artist="Daft Punk",
+        album_artist="Daft Punk",
+        album="Random Access Memories",
+        title="A" * 170,
+        track_number=1,
+        match_status=MatchStatus.EXACT,
+    )
+    rel = build_relative_path(meta_long_title, original_stem="x", max_rel_utf16=140)
+    assert utf16_len(rel.as_posix()) <= 140
+    assert rel.parts[0] == "Daft Punk"
+    assert rel.parts[1] == "Random Access Memories"
+
+    # 2. Stem hits floor 48, then album shrinks (above floor 32) while artist stays intact.
+    meta_long_all = TrackMetadata(
+        artist="A" * 60,
+        album_artist="A" * 60,
+        album="B" * 70,
+        title="T" * 120,
+        track_number=1,
+        match_status=MatchStatus.EXACT,
+    )
+    rel_2 = build_relative_path(meta_long_all, original_stem="x", max_rel_utf16=160)
+    assert utf16_len(rel_2.as_posix()) <= 160
+    assert rel_2.parts[0] == "A" * 60  # Artist untouched!
+    assert len(rel_2.parts[1]) < 70 and len(rel_2.parts[1]) >= 32  # Album shrunk cleanly!
+    assert len(rel_2.stem) == 48  # Stem hit exact floor 48!
+
+    # 3. Collision suffix " (2)" stays within budget AND keeps the exact same parent folders!
+    rel_2_dup = build_relative_path(
+        meta_long_all, original_stem="x", suffix=" (2)", max_rel_utf16=160
+    )
+    assert utf16_len(rel_2_dup.as_posix()) <= 160
+    assert rel_2_dup.parts[0] == rel_2.parts[0]
+    assert rel_2_dup.parts[1] == rel_2.parts[1]
+    assert rel_2_dup.name.endswith(" (2).mp3")
+
+    # 4. When both stem (48) and album (32) hit their floors, artist shrinks too!
+    meta_huge = TrackMetadata(
+        artist="X" * 90,
+        album_artist="X" * 90,
+        album="Y" * 90,
+        title="Z" * 120,
+        track_number=1,
+        match_status=MatchStatus.EXACT,
+    )
+    rel_3 = build_relative_path(meta_huge, original_stem="x", max_rel_utf16=140)
+    assert utf16_len(rel_3.as_posix()) <= 140
+    assert len(rel_3.parts[1]) == 32
+    assert len(rel_3.parts[0]) < 90 and len(rel_3.parts[0]) >= 32
+
+    # 5. Tight budget (60 UTF-16 units) shrinks gracefully below soft floors without error.
+    rel_tight = build_relative_path(meta_huge, original_stem="x", suffix=" (2)", max_rel_utf16=60)
+    assert utf16_len(rel_tight.as_posix()) <= 60
+    assert rel_tight.name.endswith(" (2).mp3")
+
+
+def test_phase_c_surrogate_pairs_braces_and_reserved_names_after_shrink() -> None:
+    # Surrogate pairs (emoji = 2 UTF-16 units each) must never split mid-codepoint.
+    emoji_text = "Song " + ("🎵" * 20)
+    hardened_emoji = harden_component(emoji_text, max_utf16=12)
+    assert utf16_len(hardened_emoji) <= 12
+    assert hardened_emoji == "Song 🎵🎵🎵"
+
+    # Unbalanced '{...' dropped when UTF-16 shrinking cuts inside an alias.
+    bilingual = "Long English Album Name {很長的中文專輯名稱}"
+    hardened_bi = harden_component(bilingual, max_utf16=28)
+    assert utf16_len(hardened_bi) <= 28
+    assert "{" not in hardened_bi and "}" not in hardened_bi
+    assert hardened_bi == "Long English Album Name"
+
+    # Reserved Windows device name exposed or constrained by UTF-16 shrink stays safe.
+    reserved = harden_component("CON.very_long_suffix", max_utf16=6)
+    assert reserved.startswith("CON_")
+    assert utf16_len(reserved) <= 6
+
+
+def test_phase_c_find_case_insensitive_conflict_and_needs_english_alias(tmp_path: Path) -> None:
+    # Create lowercase folder/file on disk; lookup with mixed case + NFD must still find it.
+    existing = tmp_path / "beyonc\u00e9" / "lemonade" / "01 beyonc\u00e9 - formation.mp3"
+    existing.parent.mkdir(parents=True)
+    existing.write_bytes(b"mp3")
+
+    query_rel = Path("Beyonce\u0301") / "Lemonade" / "01 Beyonce\u0301 - Formation.mp3"
+    found = find_case_insensitive_conflict(tmp_path, query_rel)
+    assert found is not None
+    assert found.name.lower() == existing.name.lower()
+
+    missing = find_case_insensitive_conflict(
+        tmp_path, Path("Beyoncé") / "Lemonade" / "02 Beyoncé - Hold Up.mp3"
+    )
+    assert missing is None
+
+    # needs_english_alias helper checks.
+    assert needs_english_alias("張學友") is True
+    assert needs_english_alias("Jacky Cheung {張學友}") is False
+    assert needs_english_alias("Beyoncé") is False
+    assert needs_english_alias("Daft Punk") is False
+    assert needs_english_alias(None) is False

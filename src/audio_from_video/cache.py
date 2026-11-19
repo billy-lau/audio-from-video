@@ -104,6 +104,7 @@ class TTLCache:
         self._conn: sqlite3.Connection | None = None
         self.disabled = False
         self.warning: str | None = None
+        self.hits = 0
         try:
             self._conn = self._open()
         except (sqlite3.Error, OSError) as exc:
@@ -212,6 +213,8 @@ class TTLCache:
         value, is_json, expires_at = row
         if float(expires_at) <= self._clock():
             return None
+        with self._lock:
+            self.hits += 1
         return bytes(value), int(is_json)
 
     def _set_row(

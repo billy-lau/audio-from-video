@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import math
 import os
 import re
+import tempfile
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -359,16 +362,19 @@ def load_config(
             if mode not in ("linear", "dynamic"):
                 raise ConfigError("Config key 'audio.loudnorm_mode' must be 'linear' or 'dynamic'.")
             cfg.audio.loudnorm_mode = mode
-        for attr, key in (
-            ("loudnorm_i", "loudnorm_i"),
-            ("loudnorm_tp", "loudnorm_tp"),
-            ("loudnorm_lra", "loudnorm_lra"),
+        for attr, key, lo, hi in (
+            ("loudnorm_i", "loudnorm_i", -70.0, -5.0),
+            ("loudnorm_tp", "loudnorm_tp", -9.0, 0.0),
+            ("loudnorm_lra", "loudnorm_lra", 1.0, 50.0),
         ):
             if key in audio_tbl:
                 val = audio_tbl[key]
                 if isinstance(val, bool) or not isinstance(val, (int, float)):
                     raise ConfigError(f"Config key 'audio.{key}' must be a number.")
-                setattr(cfg.audio, attr, float(val))
+                fval = float(val)
+                if not math.isfinite(fval) or not (lo <= fval <= hi):
+                    raise ConfigError(f"Config key 'audio.{key}' must be between {lo} and {hi}.")
+                setattr(cfg.audio, attr, fval)
 
     output_tbl = raw.get("output")
     if isinstance(output_tbl, dict):
@@ -425,3 +431,73 @@ def load_config(
         cfg.musicbrainz.user_agent_override = validate_mb_user_agent(env_ua)
 
     return cfg
+
+
+_TABLE_HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(?:#.*)?$")
+_CONTACT_KEY_RE = re.compile(r"^\s*contact\s*=")
+
+
+def save_mb_contact(contact: str, config_path: Path | None = None) -> Path:
+    """Validate and persist [musicbrainz] contact in config.toml without clobbering settings."""
+    validated = validate_mb_contact(contact)
+    target = config_path if config_path is not None else default_config_path()
+    contact_line = f"contact = {json.dumps(validated)}"
+
+    existing_lines = target.read_text(encoding="utf-8").splitlines() if target.is_file() else []
+
+    out_lines: list[str] = []
+    in_mb = False
+    found_mb = False
+    replaced_contact = False
+
+    for line in existing_lines:
+        header = _TABLE_HEADER_RE.match(line)
+        if header:
+            if in_mb and not replaced_contact:
+                out_lines.append(contact_line)
+                replaced_contact = True
+            section = header.group(1).strip()
+            is_array_table = line.lstrip().startswith("[[")
+            in_mb = section == "musicbrainz" and not is_array_table
+            if in_mb:
+                found_mb = True
+            out_lines.append(line)
+            continue
+        if in_mb and _CONTACT_KEY_RE.match(line):
+            out_lines.append(contact_line)
+            replaced_contact = True
+            continue
+        out_lines.append(line)
+
+    if found_mb and not replaced_contact:
+        out_lines.append(contact_line)
+    elif not found_mb:
+        if out_lines and out_lines[-1].strip():
+            out_lines.append("")
+        out_lines.append("[musicbrainz]")
+        out_lines.append(contact_line)
+
+    rendered = "\n".join(out_lines) + "\n"
+    try:
+        parsed = tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Unable to safely update {target}: {exc}") from exc
+    mb_section = parsed.get("musicbrainz")
+    saved_contact = mb_section.get("contact") if isinstance(mb_section, dict) else None
+    if saved_contact != validated:
+        raise ConfigError(
+            f"Unable to safely update {target} automatically; add these lines manually:\n"
+            f"[musicbrainz]\n{contact_line}"
+        )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".afv-cfg-", suffix=".tmp", dir=str(target.parent))
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(rendered)
+        os.replace(tmp_path, target)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return target

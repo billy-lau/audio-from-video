@@ -346,6 +346,7 @@ class MusicBrainzClient:
         self._search_memo: OrderedDict[str, Any] = OrderedDict()
         self._entity_memo: OrderedDict[tuple[str, str], Any] = OrderedDict()
         self._memo_lock = threading.Lock()
+        self.memo_hits = 0
 
     @property
     def headers(self) -> dict[str, str]:
@@ -362,11 +363,13 @@ class MusicBrainzClient:
             if namespace == "search":
                 if key in self._search_memo:
                     self._search_memo.move_to_end(key)
+                    self.memo_hits += 1
                     return self._search_memo[key]
                 return MISSING
             ekey = (namespace, key)
             if ekey in self._entity_memo:
                 self._entity_memo.move_to_end(ekey)
+                self.memo_hits += 1
                 return self._entity_memo[ekey]
             return MISSING
 

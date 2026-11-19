@@ -11,20 +11,33 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    TimeRemainingColumn,
+)
 from typer.core import TyperGroup
 
 from audio_from_video import __version__
+from audio_from_video.artwork import ArtworkFetcher
 from audio_from_video.binaries import MissingBinaryError, resolve_binaries
 from audio_from_video.cache import CACHE_FILENAME, TTLCache
 from audio_from_video.cli.doctor import run_doctor
+from audio_from_video.cli.prompts import make_rich_prompt_callbacks, prompt_mb_contact
 from audio_from_video.cli.rendering import render_plan_table, render_summary
 from audio_from_video.config import (
+    AppConfig,
     ConfigError,
+    MissingContactError,
     default_cache_dir,
     default_config_path,
     load_config,
     parse_quality,
+    resolve_mb_user_agent,
+    save_mb_contact,
     validate_jobs,
 )
 from audio_from_video.discovery import (
@@ -33,8 +46,16 @@ from audio_from_video.discovery import (
     discover_inputs,
 )
 from audio_from_video.logging_setup import configure_logging
+from audio_from_video.lookup import TrackResolver
 from audio_from_video.models import ConflictPolicy, ManualOverrides, PlanAction
-from audio_from_video.planner import PlanValidationError, build_offline_plan
+from audio_from_video.planner import (
+    PlanValidationError,
+    PromptCallbacks,
+    build_plan,
+    validate_manual_overrides,
+)
+from audio_from_video.providers.itunes import ITunesClient
+from audio_from_video.providers.musicbrainz import MusicBrainzClient
 from audio_from_video.runner import execute_plan, write_json_report
 
 logger = logging.getLogger(__name__)
@@ -88,6 +109,24 @@ def _version_callback(value: bool) -> None:
     if value:
         typer.echo(f"audio-from-video {__version__}")
         raise typer.Exit(code=0)
+
+
+def _is_interactive_tty() -> bool:
+    """Return True when stdin is attached to an interactive terminal."""
+    return sys.stdin.isatty()
+
+
+def _create_online_services(
+    user_agent: str,
+    cfg: AppConfig,
+    cache: TTLCache,
+) -> tuple[MusicBrainzClient, ITunesClient, TrackResolver, ArtworkFetcher]:
+    """Construct online MusicBrainz, iTunes, TrackResolver, and ArtworkFetcher services."""
+    mb_client = MusicBrainzClient(user_agent, cache=cache)
+    itunes_client = ITunesClient(cache=cache)
+    resolver = TrackResolver(mb_client, itunes_client, cfg.matching)
+    artwork_fetcher = ArtworkFetcher(mb_client, itunes_client, cache=cache)
+    return mb_client, itunes_client, resolver, artwork_fetcher
 
 
 @app.callback()
@@ -166,7 +205,7 @@ def extract_command(
     normalize: Annotated[
         bool,
         typer.Option(
-            "--normalize", help="Apply linear-first two-pass loudnorm (scheduled for Phase 3)."
+            "--normalize", help="Apply linear-first two-pass loudnorm (forces re-encoding)."
         ),
     ] = False,
     lang: Annotated[
@@ -247,7 +286,6 @@ def extract_command(
     ] = None,
 ) -> None:
     """Extract, tag, name, and organize MP3 audio from one or more video files."""
-    _ = keep_native_missing  # Active in Phase 3 online non-Latin alias prompts.
     out_console = Console()
     err_console = Console(stderr=True)
     configure_logging(verbosity=verbose, quiet=quiet, log_file=log_file, console=err_console)
@@ -265,25 +303,12 @@ def extract_command(
         err_console.print(f"[red]Error:[/red] --track must be a positive integer (got {track}).")
         raise typer.Exit(code=2)
 
-    is_tty = sys.stdin.isatty()
-    if always_prompt and (non_interactive or not is_tty):
+    is_tty = _is_interactive_tty()
+    effective_non_interactive = non_interactive or not is_tty
+    if always_prompt and effective_non_interactive:
         err_console.print(
             "[red]Error:[/red] --always-prompt requires an interactive TTY "
             "and cannot be combined with --non-interactive."
-        )
-        raise typer.Exit(code=2)
-
-    if normalize:
-        err_console.print(
-            "[red]Error:[/red] Two-pass linear loudnorm (--normalize) is scheduled for Phase 3."
-        )
-        raise typer.Exit(code=2)
-
-    if not offline:
-        err_console.print(
-            "[red]Error:[/red] Online metadata lookup arrives in Phase 3 "
-            "(providers, caching, and ranking are ready but not yet wired into extraction). "
-            "Re-run with --offline for now."
         )
         raise typer.Exit(code=2)
 
@@ -299,10 +324,7 @@ def extract_command(
             recursive=recursive,
             output_dir=effective_output_dir,
         )
-    except MultipleInputRootsError as exc:
-        err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
-        raise typer.Exit(code=2) from exc
-    except DiscoveryError as exc:
+    except (MultipleInputRootsError, DiscoveryError) as exc:
         err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from exc
 
@@ -318,6 +340,11 @@ def extract_command(
         title=title,
         track=track,
     )
+    try:
+        validate_manual_overrides(media_inputs, overrides)
+    except PlanValidationError as exc:
+        err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=2) from exc
 
     try:
         binaries = resolve_binaries(config=cfg)
@@ -325,62 +352,178 @@ def extract_command(
         err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(code=1) from exc
 
+    # Resolve MusicBrainz User-Agent before opening online providers or cache.
+    user_agent: str | None = None
+    if not offline:
+        try:
+            user_agent = resolve_mb_user_agent(cfg)
+        except MissingContactError as exc:
+            if effective_non_interactive:
+                err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+                raise typer.Exit(code=2) from exc
+            try:
+                contact = prompt_mb_contact(console=out_console)
+                saved_path = save_mb_contact(contact, cfg.config_path)
+                cfg.musicbrainz.contact = contact
+                user_agent = resolve_mb_user_agent(cfg)
+                if not quiet:
+                    out_console.print(
+                        f"[green]Saved MusicBrainz contact to {escape(str(saved_path))}.[/green]"
+                    )
+            except KeyboardInterrupt as kb_exc:
+                raise typer.Exit(code=130) from kb_exc
+            except ConfigError as cfg_exc:
+                err_console.print(f"[red]Error:[/red] {escape(str(cfg_exc))}")
+                raise typer.Exit(code=2) from cfg_exc
+            except OSError as os_exc:
+                err_console.print(
+                    f"[red]Error:[/red] Could not save the MusicBrainz contact to "
+                    f"{escape(str(cfg.config_path))}: {escape(str(os_exc))}. "
+                    "Export AFV_MB_CONTACT instead, or pass --offline."
+                )
+                raise typer.Exit(code=2) from os_exc
+        except ConfigError as exc:
+            err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+            raise typer.Exit(code=2) from exc
+
     effective_flat = cfg.output.flat if flat is None else flat
     effective_conflict = cfg.output.on_conflict if on_conflict is None else on_conflict
 
+    cache: TTLCache | None = None
+    mb_client: MusicBrainzClient | None = None
+    itunes_client: ITunesClient | None = None
+    resolver: TrackResolver | None = None
+    artwork_fetcher: ArtworkFetcher | None = None
+
     try:
-        plan_items = build_offline_plan(
-            media_inputs,
-            output_root=output_root,
-            ffprobe_path=binaries.ffprobe,
-            config=cfg,
-            overrides=overrides,
-            quality_override=quality,
-            reencode=reencode,
-            flat=effective_flat,
-            on_conflict=effective_conflict,
-            lang=lang,
-            stream_index=stream,
-        )
-    except (PlanValidationError, ConfigError) as exc:
-        err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
-        raise typer.Exit(code=2) from exc
-
-    if dry_run:
-        if not quiet:
-            render_plan_table(
-                plan_items, output_root=output_root, console=out_console, dry_run=True
+        if not offline:
+            assert user_agent is not None
+            cache = TTLCache.open_default(default_cache_dir())
+            if cache.warning and not quiet:
+                err_console.print(f"[yellow]Warning:[/yellow] {escape(cache.warning)}")
+            mb_client, itunes_client, resolver, artwork_fetcher = _create_online_services(
+                user_agent, cfg, cache
             )
-        has_fail = any(
-            item.action in (PlanAction.FAIL_NO_AUDIO, PlanAction.FAIL_ERROR) for item in plan_items
-        )
-        raise typer.Exit(code=1 if has_fail else 0)
 
-    if quiet:
-        summary = execute_plan(
-            plan_items,
-            ffmpeg_path=binaries.ffmpeg,
-            output_root=output_root,
-            jobs=worker_jobs,
-            flat=effective_flat,
-            on_conflict=effective_conflict,
-            no_artwork=no_artwork,
-            fail_fast=fail_fast,
-        )
-    else:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            console=out_console,
-            transient=False,
-        ) as progress:
-            task_id = progress.add_task("Extracting audio", total=len(plan_items))
+        prompt_callbacks: PromptCallbacks | None = None
+        if not effective_non_interactive:
+            rich_prompts = make_rich_prompt_callbacks(console=out_console)
+            if offline:
+                # In offline mode only multi-track audio stream selection may prompt.
+                prompt_callbacks = PromptCallbacks(select_stream=rich_prompts.select_stream)
+            else:
+                prompt_callbacks = rich_prompts
 
-            def _advance(_res: object, _done: int, _total: int) -> None:
-                progress.advance(task_id, 1)
+        batch_warnings: list[str] = []
 
+        # Stage 1 live progress bar (stopped cleanly before any interactive prompts).
+        stage1_progress: Progress | None = None
+        stage1_task_id = None
+        if not quiet and not offline:
+            stage1_progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TimeRemainingColumn(),
+                TextColumn("[dim]{task.fields[stats]}[/dim]"),
+                console=out_console,
+                transient=True,
+            )
+            stage1_progress.start()
+            stage1_task_id = stage1_progress.add_task(
+                "Preparing lookup",
+                total=len(media_inputs),
+                stats="cache: 0 | MB: 0",
+            )
+
+        def _stage1_stats() -> str:
+            hits = (
+                (cache.hits if cache else 0)
+                + (mb_client.memo_hits if mb_client else 0)
+                + (itunes_client.memo_hits if itunes_client else 0)
+            )
+            mb_calls = mb_client.fetcher.request_count if mb_client else 0
+            return f"cache: {hits} | MB: {mb_calls}"
+
+        def _on_probe_progress(idx: int, total_items: int, media_input: object) -> None:
+            if stage1_progress is not None and stage1_task_id is not None:
+                name = getattr(getattr(media_input, "path", None), "name", "track")
+                stage1_progress.update(
+                    stage1_task_id,
+                    completed=idx - 1,
+                    total=total_items,
+                    description=f"Probing: {escape(str(name))}",
+                    stats=_stage1_stats(),
+                )
+
+        def _on_lookup_progress(done: int, total_items: int, active_label: str) -> None:
+            if stage1_progress is not None and stage1_task_id is not None:
+                stage1_progress.update(
+                    stage1_task_id,
+                    completed=done,
+                    total=total_items,
+                    description=f"Resolving: {escape(active_label)}",
+                    stats=_stage1_stats(),
+                )
+
+        def _on_lookup_complete() -> None:
+            if stage1_progress is not None:
+                stage1_progress.stop()
+
+        try:
+            plan_items = build_plan(
+                media_inputs,
+                output_root=output_root,
+                ffprobe_path=binaries.ffprobe,
+                config=cfg,
+                resolver=resolver,
+                overrides=overrides,
+                quality_override=quality,
+                reencode=reencode,
+                normalize=normalize,
+                flat=effective_flat,
+                on_conflict=effective_conflict,
+                lang=lang,
+                stream_index=stream,
+                always_prompt=always_prompt,
+                non_interactive=effective_non_interactive,
+                keep_native_missing=keep_native_missing,
+                prompt_callbacks=prompt_callbacks,
+                on_item_planned=_on_probe_progress if stage1_progress is not None else None,
+                on_lookup_progress=_on_lookup_progress if stage1_progress is not None else None,
+                on_lookup_complete=_on_lookup_complete if stage1_progress is not None else None,
+                on_batch_warning=batch_warnings.append,
+            )
+        except (PlanValidationError, ConfigError) as exc:
+            if stage1_progress is not None:
+                stage1_progress.stop()
+            err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+            raise typer.Exit(code=2) from exc
+        except KeyboardInterrupt as kb_exc:
+            if stage1_progress is not None:
+                stage1_progress.stop()
+            raise typer.Exit(code=130) from kb_exc
+        finally:
+            if stage1_progress is not None:
+                stage1_progress.stop()
+
+        if not quiet:
+            for warn_msg in batch_warnings:
+                err_console.print(f"[yellow]Warning:[/yellow] {escape(warn_msg)}")
+
+        if dry_run:
+            if not quiet:
+                render_plan_table(
+                    plan_items, output_root=output_root, console=out_console, dry_run=True
+                )
+            has_fail = any(
+                item.action in (PlanAction.FAIL_NO_AUDIO, PlanAction.FAIL_ERROR)
+                for item in plan_items
+            )
+            raise typer.Exit(code=1 if has_fail else 0)
+
+        if quiet:
             summary = execute_plan(
                 plan_items,
                 ffmpeg_path=binaries.ffmpeg,
@@ -390,16 +533,51 @@ def extract_command(
                 on_conflict=effective_conflict,
                 no_artwork=no_artwork,
                 fail_fast=fail_fast,
-                on_result=_advance,
+                artwork_fetcher=artwork_fetcher,
             )
+        else:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                console=out_console,
+                transient=False,
+            ) as progress:
+                task_id = progress.add_task("Extracting audio", total=len(plan_items))
 
-    if report is not None:
-        write_json_report(summary, report)
+                def _advance(_res: object, _done: int, _total: int) -> None:
+                    progress.advance(task_id, 1)
 
-    if not quiet:
-        render_summary(summary, console=out_console)
+                summary = execute_plan(
+                    plan_items,
+                    ffmpeg_path=binaries.ffmpeg,
+                    output_root=output_root,
+                    jobs=worker_jobs,
+                    flat=effective_flat,
+                    on_conflict=effective_conflict,
+                    no_artwork=no_artwork,
+                    fail_fast=fail_fast,
+                    artwork_fetcher=artwork_fetcher,
+                    on_result=_advance,
+                )
 
-    raise typer.Exit(code=summary.exit_code)
+        if report is not None:
+            write_json_report(summary, report)
+
+        if not quiet:
+            render_summary(summary, console=out_console)
+
+        raise typer.Exit(code=summary.exit_code)
+    finally:
+        if mb_client is not None:
+            mb_client.fetcher.close()
+            mb_client.art_fetcher.close()
+        if itunes_client is not None:
+            itunes_client.fetcher.close()
+            itunes_client.art_fetcher.close()
+        if cache is not None:
+            cache.close()
 
 
 @app.command(name="doctor")

@@ -33,6 +33,8 @@ def _format_plan_action(item: PlanItem) -> str:
                     item.extraction.effective_bitrate_kbps or item.extraction.quality.bitrate_kbps
                 )
                 mode = f"{kbps}k"
+            if item.extraction.normalize:
+                mode = f"{mode}+norm"
         else:
             mode = "encode"
         suffix = f" ({item.conflict_note})" if item.conflict_note else ""
@@ -41,6 +43,8 @@ def _format_plan_action(item: PlanItem) -> str:
         return "[yellow]skip (exists)[/yellow]"
     if item.action == PlanAction.SKIP_NO_AUDIO:
         return "[yellow]skip (no audio)[/yellow]"
+    if item.action == PlanAction.SKIP_USER:
+        return "[yellow]skip (user)[/yellow]"
     if item.action == PlanAction.FAIL_NO_AUDIO:
         return "[red]fail (no audio)[/red]"
     return "[red]fail (error)[/red]"
@@ -64,7 +68,14 @@ def render_plan_table(
     table.add_column("Notes", style="dim", overflow="fold")
 
     for item in plan_items:
-        status = item.metadata.match_status.value if item.metadata else "—"
+        if item.metadata:
+            src = item.metadata.source_description
+            if src and src not in ("offline", "manual"):
+                status = f"{item.metadata.match_status.value} ({src})"
+            else:
+                status = item.metadata.match_status.value
+        else:
+            status = "—"
         notes: list[str] = []
         if item.error:
             notes.append(item.error)

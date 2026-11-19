@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from pathlib import Path
@@ -14,6 +15,14 @@ UNMATCHED_DIR = "_unmatched"
 
 DEFAULT_MAX_COMPONENT_BYTES = 200
 DEFAULT_MAX_STEM_BYTES = 196  # Leaves 4 bytes for ".mp3".
+
+MAX_REL_UTF16 = 180
+MIN_REL_UTF16 = 60
+TARGET_FULL_UTF16 = 240
+LONG_OUTPUT_ROOT_WARN_UTF16 = 180
+STEM_SHRINK_FLOOR_UTF16 = 48
+ALBUM_SHRINK_FLOOR_UTF16 = 32
+ARTIST_SHRINK_FLOOR_UTF16 = 32
 
 WINDOWS_RESERVED_NAMES: frozenset[str] = frozenset(
     {
@@ -99,6 +108,94 @@ def format_bilingual(english: str | None, original: str) -> str:
         # Prefer the accented/original representation (e.g., Beyoncé over Beyonce).
         return orig_clean
     return f"{eng_clean} {{{orig_clean}}}"
+
+
+def needs_english_alias(text: str | None) -> bool:
+    """Return True if text has non-Latin script characters and lacks a Latin 'eng {orig}' prefix."""
+    if not text or not text.strip():
+        return False
+    cleaned = unicodedata.normalize("NFC", text).strip()
+    if not has_non_latin(cleaned):
+        return False
+    if _ALREADY_BILINGUAL_RE.match(cleaned):
+        prefix = cleaned.partition("{")[0].strip()
+        if prefix and not has_non_latin(prefix):
+            return False
+    return True
+
+
+def utf16_len(text: str) -> int:
+    """Measure string length in UTF-16 code units (Windows MAX_PATH unit)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+def nfc_casefold(text: str) -> str:
+    """Normalize text to NFC and case-fold for cross-platform path comparisons."""
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def compute_relative_path_budget(output_root: Path) -> tuple[int, str | None]:
+    """Compute Phase C UTF-16 relative path budget and optional long-root warning."""
+    root_len = utf16_len(str(output_root))
+    budget = min(MAX_REL_UTF16, max(MIN_REL_UTF16, TARGET_FULL_UTF16 - root_len - 1))
+    warning: str | None = None
+    if root_len >= LONG_OUTPUT_ROOT_WARN_UTF16:
+        warning = (
+            f"Output root path is {root_len} UTF-16 code units (>= {LONG_OUTPUT_ROOT_WARN_UTF16}); "
+            "consider using a shorter -o/--output-dir on Windows to stay within MAX_PATH."
+        )
+    return budget, warning
+
+
+def find_case_insensitive_conflict(
+    root: Path,
+    rel_path: Path,
+    *,
+    dir_cache: dict[Path, list[tuple[str, str, bool]]] | None = None,
+) -> Path | None:
+    """Return an existing path matching rel_path under NFC case-folding via os.scandir.
+
+    Works uniformly across Windows, macOS, and case-sensitive Linux filesystems.
+    """
+    parts = rel_path.parts
+    if not parts:
+        return None
+
+    def _list_dir(directory: Path) -> list[tuple[str, str, bool]]:
+        if dir_cache is not None and directory in dir_cache:
+            return dir_cache[directory]
+        entries: list[tuple[str, str, bool]] = []
+        try:
+            with os.scandir(directory) as it:
+                for entry in it:
+                    try:
+                        is_dir = entry.is_dir(follow_symlinks=True)
+                    except OSError:
+                        is_dir = False
+                    entries.append((entry.name, nfc_casefold(entry.name), is_dir))
+        except OSError:
+            entries = []
+        entries.sort(key=lambda item: (item[1], item[0]))
+        if dir_cache is not None:
+            dir_cache[directory] = entries
+        return entries
+
+    def _walk(current: Path, idx: int) -> Path | None:
+        target_cf = nfc_casefold(parts[idx])
+        is_last = idx == len(parts) - 1
+        for name, name_cf, is_dir in _list_dir(current):
+            if name_cf != target_cf:
+                continue
+            matched = current / name
+            if is_last:
+                return matched
+            if is_dir:
+                found = _walk(matched, idx + 1)
+                if found is not None:
+                    return found
+        return None
+
+    return _walk(root, 0)
 
 
 def split_featuring_names(raw: str) -> list[str]:
@@ -316,6 +413,31 @@ def _truncate_utf8_safe(text: str, max_bytes: int) -> str:
     return text[:cut_index]
 
 
+def _truncate_utf16_safe(text: str, max_units: int) -> str:
+    """Truncate text to <= max_units UTF-16 code units without splitting surrogates or marks."""
+    if max_units <= 0:
+        return ""
+    if utf16_len(text) <= max_units:
+        return text
+
+    total = 0
+    cut_index = 0
+    for idx, ch in enumerate(text):
+        ch_units = 2 if ord(ch) > 0xFFFF else 1
+        if total + ch_units > max_units:
+            break
+        total += ch_units
+        cut_index = idx + 1
+
+    if cut_index < len(text) and unicodedata.combining(text[cut_index]) != 0:
+        while cut_index > 0 and unicodedata.combining(text[cut_index - 1]) != 0:
+            cut_index -= 1
+        if cut_index > 0:
+            cut_index -= 1
+
+    return text[:cut_index]
+
+
 def _drop_unbalanced_brace(text: str) -> str:
     """Drop any incomplete trailing '{...' alias suffix so braces remain balanced."""
     last_open = text.rfind("{")
@@ -324,8 +446,13 @@ def _drop_unbalanced_brace(text: str) -> str:
     return text
 
 
-def harden_component(text: str, *, max_bytes: int = DEFAULT_MAX_COMPONENT_BYTES) -> str:
-    """Phase B: Final path-component hardening (dots, UTF-8 bytes, braces, and reserved names)."""
+def harden_component(
+    text: str,
+    *,
+    max_bytes: int = DEFAULT_MAX_COMPONENT_BYTES,
+    max_utf16: int | None = None,
+) -> str:
+    """Phase B/C: Final component hardening (dots, UTF-8/UTF-16 limits, braces, and reserved)."""
     s = unicodedata.normalize("NFC", text)
     s = s.lstrip(" .")
     s = s.rstrip(" .")
@@ -335,6 +462,12 @@ def harden_component(text: str, *, max_bytes: int = DEFAULT_MAX_COMPONENT_BYTES)
         truncated = _drop_unbalanced_brace(truncated)
     s = truncated.rstrip(" .")
 
+    if max_utf16 is not None and utf16_len(s) > max_utf16:
+        truncated_16 = _truncate_utf16_safe(s, max_utf16)
+        if truncated_16 != s:
+            truncated_16 = _drop_unbalanced_brace(truncated_16)
+        s = truncated_16.rstrip(" .")
+
     if not s:
         return "_"
 
@@ -342,12 +475,17 @@ def harden_component(text: str, *, max_bytes: int = DEFAULT_MAX_COMPONENT_BYTES)
     base, sep, rest = s.partition(".")
     if base.upper() in WINDOWS_RESERVED_NAMES:
         guarded = f"{base}_{sep}{rest}"
-        if len(guarded.encode("utf-8")) > max_bytes:
-            # Preserve the '_' suffix immediately after the reserved base name.
+        over_bytes = len(guarded.encode("utf-8")) > max_bytes
+        over_u16 = max_utf16 is not None and utf16_len(guarded) > max_utf16
+        if over_bytes or over_u16:
             prefix = f"{base}_"
-            remaining_budget = max_bytes - len(prefix.encode("utf-8"))
-            if sep and remaining_budget > 1:
-                tail = _truncate_utf8_safe(f".{rest}", remaining_budget).rstrip(" .")
+            rem_bytes = max_bytes - len(prefix.encode("utf-8"))
+            rem_u16 = (max_utf16 - utf16_len(prefix)) if max_utf16 is not None else None
+            if sep and rem_bytes > 1 and (rem_u16 is None or rem_u16 > 1):
+                tail = _truncate_utf8_safe(f".{rest}", rem_bytes)
+                if rem_u16 is not None and utf16_len(tail) > rem_u16:
+                    tail = _truncate_utf16_safe(tail, rem_u16)
+                tail = _drop_unbalanced_brace(tail).rstrip(" .")
                 guarded = f"{prefix}{tail}" if tail and tail != "." else prefix
             else:
                 guarded = prefix
@@ -356,21 +494,11 @@ def harden_component(text: str, *, max_bytes: int = DEFAULT_MAX_COMPONENT_BYTES)
     return s
 
 
-def build_filename(
-    metadata: TrackMetadata,
-    *,
-    original_stem: str | None = None,
-    suffix: str = "",
-) -> str:
-    """Assemble and harden the final '.mp3' filename for a track."""
-    suffix_bytes = len(suffix.encode("utf-8"))
-    stem_budget = max(16, DEFAULT_MAX_STEM_BYTES - suffix_bytes)
-
+def _raw_filename_stem(metadata: TrackMetadata, *, original_stem: str | None = None) -> str:
+    """Assemble the unsanitized-phase-B filename stem before component hardening."""
     if metadata.match_status == MatchStatus.UNMATCHED or not (metadata.artist and metadata.title):
         raw_stem = original_stem or metadata.title or "track"
-        sanitized_stem = sanitize_field(raw_stem) or "_"
-        hardened = harden_component(sanitized_stem, max_bytes=stem_budget)
-        return f"{hardened}{suffix}.mp3"
+        return sanitize_field(raw_stem) or "_"
 
     artist_part = sanitize_field(metadata.artist)
     title_part = sanitize_field(metadata.title)
@@ -384,14 +512,124 @@ def build_filename(
         disc_number=metadata.disc_number,
         disc_total=metadata.disc_total,
     )
-
     if prefix:
-        raw_stem = f"{prefix} {artist_display} - {title_part}"
-    else:
-        raw_stem = f"{artist_display} - {title_part}"
+        return f"{prefix} {artist_display} - {title_part}"
+    return f"{artist_display} - {title_part}"
 
-    hardened = harden_component(raw_stem, max_bytes=stem_budget)
+
+def build_filename(
+    metadata: TrackMetadata,
+    *,
+    original_stem: str | None = None,
+    suffix: str = "",
+    max_stem_utf16: int | None = None,
+) -> str:
+    """Assemble and harden the final '.mp3' filename for a track."""
+    suffix_bytes = len(suffix.encode("utf-8"))
+    stem_budget = max(16, DEFAULT_MAX_STEM_BYTES - suffix_bytes)
+    raw_stem = _raw_filename_stem(metadata, original_stem=original_stem)
+    hardened = harden_component(raw_stem, max_bytes=stem_budget, max_utf16=max_stem_utf16)
     return f"{hardened}{suffix}.mp3"
+
+
+def _shrink_nested_components(
+    raw_artist: str,
+    raw_album: str,
+    raw_stem: str,
+    *,
+    stem_byte_budget: int,
+    suffix: str,
+    max_rel_utf16: int,
+) -> tuple[str, str, str]:
+    """Phase C: Shrink title/stem -> album -> artist to fit within max_rel_utf16 UTF-16 units.
+
+    First shrinks the unsuffixed base path using the priority order stem (floor 48) ->
+    album (floor 32) -> artist (floor 32) so collision suffixes such as ' (2)' keep the
+    exact same parent folder as the unsuffixed track while staying within max_rel_utf16.
+    """
+    artist_dir = harden_component(raw_artist, max_bytes=DEFAULT_MAX_COMPONENT_BYTES)
+    album_dir = harden_component(raw_album, max_bytes=DEFAULT_MAX_COMPONENT_BYTES)
+    stem = harden_component(raw_stem, max_bytes=stem_byte_budget)
+
+    ext_u16 = 4  # ".mp3"
+    sep_u16 = 2  # "<artist>/<album>/<filename>"
+
+    def _base_excess() -> int:
+        total = utf16_len(artist_dir) + utf16_len(album_dir) + utf16_len(stem) + sep_u16 + ext_u16
+        return total - max_rel_utf16
+
+    # Pass 1: spec soft floors (stem 48 -> album 32 -> artist 32), then emergency pass
+    # if max_rel_utf16 itself is smaller than the sum of soft floors (e.g., 60..118).
+    for stem_floor, album_floor, artist_floor in (
+        (STEM_SHRINK_FLOOR_UTF16, ALBUM_SHRINK_FLOOR_UTF16, ARTIST_SHRINK_FLOOR_UTF16),
+        (16, 12, 12),
+        (1, 1, 1),
+    ):
+        excess = _base_excess()
+        if excess > 0 and utf16_len(stem) > stem_floor:
+            target = max(stem_floor, utf16_len(stem) - excess)
+            stem = harden_component(raw_stem, max_bytes=stem_byte_budget, max_utf16=target)
+        excess = _base_excess()
+        if excess > 0 and utf16_len(album_dir) > album_floor:
+            target = max(album_floor, utf16_len(album_dir) - excess)
+            album_dir = harden_component(
+                raw_album, max_bytes=DEFAULT_MAX_COMPONENT_BYTES, max_utf16=target
+            )
+        excess = _base_excess()
+        if excess > 0 and utf16_len(artist_dir) > artist_floor:
+            target = max(artist_floor, utf16_len(artist_dir) - excess)
+            artist_dir = harden_component(
+                raw_artist, max_bytes=DEFAULT_MAX_COMPONENT_BYTES, max_utf16=target
+            )
+        if _base_excess() <= 0:
+            break
+
+    # Now account for collision suffix (e.g., " (2)") by shrinking stem without shifting folders.
+    suffix_u16 = utf16_len(suffix)
+    if suffix_u16 > 0:
+        folder_plus_tail = (
+            utf16_len(artist_dir) + utf16_len(album_dir) + sep_u16 + suffix_u16 + ext_u16
+        )
+        avail_stem = max_rel_utf16 - folder_plus_tail
+        if utf16_len(stem) > avail_stem:
+            if avail_stem >= 1:
+                stem = harden_component(raw_stem, max_bytes=stem_byte_budget, max_utf16=avail_stem)
+            else:
+                # Extreme fallback when suffix alone exceeds remaining room.
+                stem = harden_component(raw_stem, max_bytes=stem_byte_budget, max_utf16=1)
+                for floor in (12, 1):
+                    over = (
+                        utf16_len(artist_dir)
+                        + utf16_len(album_dir)
+                        + utf16_len(stem)
+                        + sep_u16
+                        + suffix_u16
+                        + ext_u16
+                        - max_rel_utf16
+                    )
+                    if over > 0 and utf16_len(album_dir) > floor:
+                        album_dir = harden_component(
+                            raw_album,
+                            max_bytes=DEFAULT_MAX_COMPONENT_BYTES,
+                            max_utf16=max(floor, utf16_len(album_dir) - over),
+                        )
+                    over = (
+                        utf16_len(artist_dir)
+                        + utf16_len(album_dir)
+                        + utf16_len(stem)
+                        + sep_u16
+                        + suffix_u16
+                        + ext_u16
+                        - max_rel_utf16
+                    )
+                    if over > 0 and utf16_len(artist_dir) > floor:
+                        artist_dir = harden_component(
+                            raw_artist,
+                            max_bytes=DEFAULT_MAX_COMPONENT_BYTES,
+                            max_utf16=max(floor, utf16_len(artist_dir) - over),
+                        )
+
+    return artist_dir, album_dir, stem
 
 
 def build_relative_path(
@@ -400,30 +638,51 @@ def build_relative_path(
     original_stem: str,
     flat: bool = False,
     suffix: str = "",
+    max_rel_utf16: int | None = MAX_REL_UTF16,
 ) -> Path:
-    """Build the relative output path under <output_root>/ for a track (Phases A & B)."""
-    filename = build_filename(metadata, original_stem=original_stem, suffix=suffix)
+    """Build the relative output path under <output_root>/ for a track (Phases A, B, and C)."""
+    suffix_bytes = len(suffix.encode("utf-8"))
+    stem_byte_budget = max(16, DEFAULT_MAX_STEM_BYTES - suffix_bytes)
+    raw_stem = _raw_filename_stem(metadata, original_stem=original_stem)
+    tail_u16 = utf16_len(suffix) + 4  # "<suffix>.mp3"
 
-    if metadata.match_status == MatchStatus.UNMATCHED or not (metadata.artist and metadata.title):
-        if flat:
-            return Path(filename)
-        return Path(UNMATCHED_DIR) / filename
-
-    if flat:
-        return Path(filename)
-
-    raw_album_artist = metadata.effective_album_artist or UNKNOWN_ARTIST
-    artist_dir = harden_component(
-        sanitize_field(raw_album_artist) or UNKNOWN_ARTIST,
-        max_bytes=DEFAULT_MAX_COMPONENT_BYTES,
+    is_unmatched = metadata.match_status == MatchStatus.UNMATCHED or not (
+        metadata.artist and metadata.title
     )
 
-    if metadata.album is not None and metadata.album.strip():
-        album_dir = harden_component(
-            sanitize_field(metadata.album),
-            max_bytes=DEFAULT_MAX_COMPONENT_BYTES,
-        )
-    else:
-        album_dir = UNKNOWN_ALBUM
+    if flat:
+        max_stem_u16 = max(1, max_rel_utf16 - tail_u16) if max_rel_utf16 is not None else None
+        stem = harden_component(raw_stem, max_bytes=stem_byte_budget, max_utf16=max_stem_u16)
+        return Path(f"{stem}{suffix}.mp3")
 
-    return Path(artist_dir) / album_dir / filename
+    if is_unmatched:
+        prefix_u16 = utf16_len(UNMATCHED_DIR) + 1
+        max_stem_u16 = (
+            max(1, max_rel_utf16 - prefix_u16 - tail_u16) if max_rel_utf16 is not None else None
+        )
+        stem = harden_component(raw_stem, max_bytes=stem_byte_budget, max_utf16=max_stem_u16)
+        return Path(UNMATCHED_DIR) / f"{stem}{suffix}.mp3"
+
+    raw_album_artist = (
+        sanitize_field(metadata.effective_album_artist or UNKNOWN_ARTIST) or UNKNOWN_ARTIST
+    )
+    if metadata.album is not None and metadata.album.strip():
+        raw_album = sanitize_field(metadata.album) or UNKNOWN_ALBUM
+    else:
+        raw_album = UNKNOWN_ALBUM
+
+    if max_rel_utf16 is None:
+        artist_dir = harden_component(raw_album_artist, max_bytes=DEFAULT_MAX_COMPONENT_BYTES)
+        album_dir = harden_component(raw_album, max_bytes=DEFAULT_MAX_COMPONENT_BYTES)
+        stem = harden_component(raw_stem, max_bytes=stem_byte_budget)
+    else:
+        artist_dir, album_dir, stem = _shrink_nested_components(
+            raw_album_artist,
+            raw_album,
+            raw_stem,
+            stem_byte_budget=stem_byte_budget,
+            suffix=suffix,
+            max_rel_utf16=max_rel_utf16,
+        )
+
+    return Path(artist_dir) / album_dir / f"{stem}{suffix}.mp3"
