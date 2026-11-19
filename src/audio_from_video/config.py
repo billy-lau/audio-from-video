@@ -199,6 +199,11 @@ def validate_mb_contact(contact: str) -> str:
         )
     if _CONTROL_CHARS_RE.search(cleaned):
         raise ConfigError("MusicBrainz contact must not contain control characters or newlines.")
+    if not cleaned.isascii():
+        raise ConfigError(
+            "MusicBrainz contact must contain only ASCII characters "
+            "(HTTP User-Agent headers require ASCII)."
+        )
     if "mozilla/" in cleaned.lower():
         raise ConfigError(
             "Spoofed browser User-Agent strings (Mozilla/...) are blocked by MusicBrainz."
@@ -239,6 +244,11 @@ def validate_mb_user_agent(user_agent: str) -> str:
         raise ConfigError("AFV_MB_USER_AGENT cannot be blank.")
     if _CONTROL_CHARS_RE.search(cleaned):
         raise ConfigError("AFV_MB_USER_AGENT must not contain control characters or newlines.")
+    if not cleaned.isascii():
+        raise ConfigError(
+            "AFV_MB_USER_AGENT must contain only ASCII characters "
+            "(HTTP User-Agent headers require ASCII)."
+        )
     if "mozilla/" in cleaned.lower():
         raise ConfigError(
             "Spoofed browser User-Agent strings (Mozilla/...) are blocked by MusicBrainz. "

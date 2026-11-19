@@ -43,10 +43,13 @@ _NOISE_BRACKET_RE = re.compile(
     r"[\(\[\uff08\u3010\uff3b]\s*(?:"
     r"official(?:\s+(?:music|lyric|audio|hd|4k))?\s*(?:video|audio|mv|m/v|visualizer|track)|"
     r"music\s+video|lyric(?:s)?\s+video|audio(?:\s+only)?|visualizer|"
-    r"(?:4k|8k|hd|hq|uhd|1080p|720p|480p|2160p|60fps)(?:\s+(?:remaster(?:ed)?|video|audio|mv))?|"
+    r"(?:4k|8k|hd|hq|uhd|1080p|720p|480p|2160p|60fps)"
+    r"(?:\s+(?:remaster(?:ed)?|upgrade|video|audio|mv|hd))?|"
+    r"remaster(?:ed)?\s+in\s+(?:4k|8k|hd|uhd)|"
     r"lyrics?|mv|m/v|full\s+(?:hd|video|song|audio)|"
     r"topic|vevo|"
     r"(?:官方|公式)\s*(?:mv|m/v|音樂錄影帶|音樂視頻|音頻|音频|完整版)?|"
+    r"(?:공식\s*)?(?:뮤직비디오|뮤비|mv|m/v)|"
     r"高音質|高画質|高畫質|高清|歌詞|歌词|中文字幕|字幕|完整版|純享版|纯享版"
     r")\s*[\)\]\uff09\u3011\uff3d]",
     re.IGNORECASE,

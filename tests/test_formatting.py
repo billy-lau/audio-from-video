@@ -16,6 +16,15 @@ from audio_from_video.formatting import (
 from audio_from_video.models import MatchStatus, TrackMetadata
 
 
+def test_has_non_latin_ignores_hawaiian_okina_and_micro_sign() -> None:
+    assert has_non_latin("Israel Kamakawiwo\u02bbole") is False
+    assert has_non_latin("\u00b5-Ziq") is False
+    assert has_non_latin("Beyonc\u00e9") is False
+    assert has_non_latin("張學友") is True
+    assert has_non_latin("방탄소년단") is True
+    assert has_non_latin("Кино") is True
+
+
 def test_section3_concrete_examples() -> None:
     """Verify all 12 concrete examples from design_spec Section 3 verbatim."""
     cases = [

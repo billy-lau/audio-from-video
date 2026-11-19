@@ -55,9 +55,17 @@ _ALREADY_BILINGUAL_RE = re.compile(r"^.+\s\{.+\}$")
 
 
 def has_non_latin(text: str) -> bool:
-    """Return True if text contains any letter outside the Latin script."""
+    """Return True if text contains any letter outside the Latin script.
+
+    Spacing modifier letters in the Latin/IPA block (such as Hawaiian okina U+02BB)
+    and the Latin-1 micro sign (U+00B5) are not treated as non-Latin scripts.
+    """
     for ch in text:
         if not ch.isalpha():
+            continue
+        if ch == "\u00b5":
+            continue
+        if unicodedata.category(ch) == "Lm" and ord(ch) < 0x0370:
             continue
         name = unicodedata.name(ch, "")
         if "LATIN" not in name:

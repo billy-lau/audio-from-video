@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -15,6 +16,7 @@ from typer.core import TyperGroup
 
 from audio_from_video import __version__
 from audio_from_video.binaries import MissingBinaryError, resolve_binaries
+from audio_from_video.cache import CACHE_FILENAME, TTLCache
 from audio_from_video.cli.doctor import run_doctor
 from audio_from_video.cli.rendering import render_plan_table, render_summary
 from audio_from_video.config import (
@@ -74,7 +76,7 @@ config_app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 cache_app = typer.Typer(
-    help="Inspect or clear the SQLite TTL cache (implemented in Phase 2/4).",
+    help="Inspect or clear the SQLite TTL cache (clear arrives in Phase 4).",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -279,8 +281,9 @@ def extract_command(
 
     if not offline:
         err_console.print(
-            "[red]Error:[/red] Online metadata lookup arrives in Phase 2/3. "
-            "Re-run with --offline for the Phase 1 walking slice."
+            "[red]Error:[/red] Online metadata lookup arrives in Phase 3 "
+            "(providers, caching, and ranking are ready but not yet wired into extraction). "
+            "Re-run with --offline for now."
         )
         raise typer.Exit(code=2)
 
@@ -440,11 +443,52 @@ def config_show_command() -> None:
     typer.echo(f"musicbrainz.contact = {cfg.musicbrainz.contact or '(not set)'}")
 
 
+def _format_bytes(num_bytes: int) -> str:
+    """Format a byte count into a compact human-readable string."""
+    size = float(max(0, num_bytes))
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024.0 or unit == "GB":
+            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} GB"
+
+
 @cache_app.command(name="stats")
 def cache_stats_command() -> None:
-    """Show the cache directory path (full TTL stats arrive in Phase 2/4)."""
-    typer.echo(f"Cache directory: {default_cache_dir()}")
-    typer.echo("SQLite TTL cache statistics arrive in Phase 2/4.")
+    """Show per-namespace SQLite TTL cache row counts, expired rows, and sizes."""
+    cache_dir = default_cache_dir()
+    typer.echo(f"Cache directory: {cache_dir}")
+    cache_file = cache_dir / CACHE_FILENAME
+    if not cache_file.is_file():
+        typer.echo("Cache is empty (no cache file has been created yet).")
+        return
+    try:
+        stats = TTLCache.read_stats(cache_file)
+    except (OSError, sqlite3.Error) as exc:
+        typer.echo(f"Could not read cache: {exc}", err=True)
+        msg = str(exc).lower()
+        if any(phrase in msg for phrase in ("not a database", "malformed", "corrupt")):
+            typer.echo(
+                "Hint: the next online run will automatically move the corrupt file aside "
+                "and start a fresh cache.",
+                err=True,
+            )
+        raise typer.Exit(code=1) from exc
+    total_rows = 0
+    total_expired = 0
+    total_bytes = 0
+    for entry in stats:
+        total_rows += entry.rows
+        total_expired += entry.expired
+        total_bytes += entry.bytes
+        typer.echo(
+            f"{entry.namespace:<14} rows={entry.rows:<6} expired={entry.expired:<6} "
+            f"size={_format_bytes(entry.bytes):<10} ttl_days={entry.ttl_seconds // 86_400}"
+        )
+    typer.echo(
+        f"{'Total':<14} rows={total_rows:<6} expired={total_expired:<6} "
+        f"size={_format_bytes(total_bytes)}"
+    )
 
 
 def main() -> None:

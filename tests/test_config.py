@@ -161,6 +161,8 @@ def test_validate_mb_contact_valid(contact: str) -> None:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
         "not-an-email-or-url",
         "user@domain\nInjected: yes",
+        "josé@duck.com",
+        "https://github.com/josé/audio-from-video",
     ],
 )
 def test_validate_mb_contact_rejects_placeholders_and_browsers(bad_contact: str) -> None:
@@ -176,6 +178,8 @@ def test_validate_mb_user_agent() -> None:
         validate_mb_user_agent("Mozilla/5.0 ( https://github.com/org/repo )")
     with pytest.raises(ConfigError):
         validate_mb_user_agent("audio-from-video/0.1.0 ( https://example.com/afv )")
+    with pytest.raises(ConfigError):
+        validate_mb_user_agent("audio-from-video/0.1.0 ( josé@duck.com )")
     with pytest.raises(ConfigError):
         validate_mb_user_agent("audio-from-video")
 

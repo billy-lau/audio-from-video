@@ -1,0 +1,1569 @@
+[
+  {
+    "id": "h-clear-01",
+    "category": "clear",
+    "input": {
+      "filename": "Queen - Bohemian Rhapsody (Official Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 359
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Queen",
+      "title": "Bohemian Rhapsody",
+      "album": "A Night at the Opera",
+      "track_number": 11,
+      "disc_number": null
+    },
+    "notes": "5:59 official video vs. 5:55 album track."
+  },
+  {
+    "id": "h-clear-02",
+    "category": "clear",
+    "input": {
+      "filename": "01 Come Together.mp4",
+      "parent_dirs": [
+        "The Beatles",
+        "Abbey Road"
+      ],
+      "tags": {},
+      "duration_seconds": 259
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Beatles",
+      "title": "Come Together",
+      "album": "Abbey Road",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 1 of 3 under The Beatles/Abbey Road."
+  },
+  {
+    "id": "h-clear-03",
+    "category": "clear",
+    "input": {
+      "filename": "02 Something.mp4",
+      "parent_dirs": [
+        "The Beatles",
+        "Abbey Road"
+      ],
+      "tags": {},
+      "duration_seconds": 182
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Beatles",
+      "title": "Something",
+      "album": "Abbey Road",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 2 of 3 under The Beatles/Abbey Road."
+  },
+  {
+    "id": "h-clear-04",
+    "category": "clear",
+    "input": {
+      "filename": "07 Here Comes the Sun.mp4",
+      "parent_dirs": [
+        "The Beatles",
+        "Abbey Road"
+      ],
+      "tags": {},
+      "duration_seconds": 185
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Beatles",
+      "title": "Here Comes the Sun",
+      "album": "Abbey Road",
+      "track_number": 7,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 3 of 3 under The Beatles/Abbey Road."
+  },
+  {
+    "id": "h-clear-05",
+    "category": "clear",
+    "input": {
+      "filename": "2-01 Birthday.mp4",
+      "parent_dirs": [
+        "The Beatles",
+        "The Beatles"
+      ],
+      "tags": {},
+      "duration_seconds": 162
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Beatles",
+      "title": "Birthday",
+      "album": "The Beatles",
+      "track_number": 1,
+      "disc_number": 2
+    },
+    "notes": "White Album, disc 2, track 1."
+  },
+  {
+    "id": "h-clear-06",
+    "category": "clear",
+    "input": {
+      "filename": "02 R U Mine.mp4",
+      "parent_dirs": [
+        "Arctic Monkeys",
+        "AM"
+      ],
+      "tags": {},
+      "duration_seconds": 201
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Arctic Monkeys",
+      "title_any_of": [
+        "R U Mine?",
+        "R U Mine"
+      ],
+      "album": "AM",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 1 of 3 under Arctic Monkeys/AM."
+  },
+  {
+    "id": "h-clear-07",
+    "category": "clear",
+    "input": {
+      "filename": "04 Arabella.mp4",
+      "parent_dirs": [
+        "Arctic Monkeys",
+        "AM"
+      ],
+      "tags": {},
+      "duration_seconds": 207
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Arctic Monkeys",
+      "title": "Arabella",
+      "album": "AM",
+      "track_number": 4,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 2 of 3 under Arctic Monkeys/AM."
+  },
+  {
+    "id": "h-clear-08",
+    "category": "clear",
+    "input": {
+      "filename": "10. Snap Out of It.mp4",
+      "parent_dirs": [
+        "Arctic Monkeys",
+        "AM"
+      ],
+      "tags": {},
+      "duration_seconds": 193
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Arctic Monkeys",
+      "title": "Snap Out of It",
+      "album": "AM",
+      "track_number": 10,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 3 of 3 under Arctic Monkeys/AM."
+  },
+  {
+    "id": "h-clear-09",
+    "category": "clear",
+    "input": {
+      "filename": "Green Day - Wake Me Up When September Ends (Official Music Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 432
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Green Day",
+      "title": "Wake Me Up When September Ends",
+      "album": "American Idiot",
+      "track_number": 11,
+      "disc_number": null
+    },
+    "notes": "Long narrative official video (7:12) vs. 4:45 album track (+147s)."
+  },
+  {
+    "id": "h-clear-10",
+    "category": "clear",
+    "input": {
+      "filename": "a-ha - Take On Me (Official Video) [Remastered in 4K].mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 244
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "a-ha",
+      "title": "Take On Me",
+      "album": "Hunting High and Low",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "4:04 music video (+19s) with [Remastered in 4K] noise."
+  },
+  {
+    "id": "h-clear-11",
+    "category": "clear",
+    "input": {
+      "filename": "Coldplay - Clocks (Official Lyric Video) [1080p HD].mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 307
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Coldplay",
+      "title": "Clocks",
+      "album": "A Rush of Blood to the Head",
+      "track_number": 5,
+      "disc_number": null
+    },
+    "notes": "Noisy lyric-video and 1080p HD brackets."
+  },
+  {
+    "id": "h-clear-12",
+    "category": "clear",
+    "input": {
+      "filename": "Mr. Brightside - The Killers.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 222
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Killers",
+      "title": "Mr. Brightside",
+      "album": "Hot Fuss",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Swapped Title - Artist filename (no container tags)."
+  },
+  {
+    "id": "h-clear-13",
+    "category": "clear",
+    "input": {
+      "filename": "Chandelier - Sia.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 216
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Sia",
+      "title": "Chandelier",
+      "album": "1000 Forms of Fear",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Swapped Title - Artist filename (no container tags)."
+  },
+  {
+    "id": "h-clear-14",
+    "category": "clear",
+    "input": {
+      "filename": "Cheap Trick - I Want You to Want Me (Live at Budokan).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 224
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Cheap Trick",
+      "title": "I Want You to Want Me",
+      "album_any_of": [
+        "Cheap Trick at Budokan",
+        "At Budokan"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Live edition: must pick the live Budokan album over the 1977 studio album."
+  },
+  {
+    "id": "h-clear-15",
+    "category": "clear",
+    "input": {
+      "filename": "Talking Heads - Burning Down the House (Live).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 253
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Talking Heads",
+      "title": "Burning Down the House",
+      "album": "Stop Making Sense",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Live edition: must pick Stop Making Sense over Speaking in Tongues."
+  },
+  {
+    "id": "h-clear-16",
+    "category": "clear",
+    "input": {
+      "filename": "Mr. Probz - Waves (Robin Schulz Remix).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 208
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Mr. Probz",
+      "title": "Waves",
+      "title_contains": "robin schulz",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Remix edition; title_contains rejects the plain studio version."
+  },
+  {
+    "id": "h-clear-17",
+    "category": "clear",
+    "input": {
+      "filename": "Lana Del Rey - Summertime Sadness (Cedric Gervais Remix).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 214
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Lana Del Rey",
+        "Lana Del Rey vs. Cedric Gervais"
+      ],
+      "title": "Summertime Sadness",
+      "title_contains": "cedric gervais",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Remix edition; title_contains rejects the plain studio version."
+  },
+  {
+    "id": "h-clear-18",
+    "category": "clear",
+    "input": {
+      "filename": "Stevie Wonder - Superstition.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 266
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Stevie Wonder",
+      "title": "Superstition",
+      "album": "Talking Book",
+      "track_number": 6,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick Talking Book (1972), not Greatest Hits or The Definitive Collection."
+  },
+  {
+    "id": "h-clear-19",
+    "category": "clear",
+    "input": {
+      "filename": "Elton John - Rocket Man (Official Music Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 282
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Elton John",
+      "title_any_of": [
+        "Rocket Man (I Think It's Going to Be a Long, Long Time)",
+        "Rocket Man"
+      ],
+      "album": "Honky Château",
+      "track_number": 5,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick Honky Château (1972), not Diamonds or Greatest Hits."
+  },
+  {
+    "id": "h-clear-20",
+    "category": "clear",
+    "input": {
+      "filename": "David Bowie - Heroes.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 371
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "David Bowie",
+      "title_any_of": [
+        "“Heroes”",
+        "\"Heroes\"",
+        "Heroes"
+      ],
+      "album_any_of": [
+        "“Heroes”",
+        "\"Heroes\"",
+        "Heroes"
+      ],
+      "track_number": 3,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick \"Heroes\" (1977), not Best of Bowie."
+  },
+  {
+    "id": "h-clear-21",
+    "category": "clear",
+    "input": {
+      "filename": "Bob Marley & The Wailers - Three Little Birds.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 180
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Bob Marley & The Wailers",
+        "Bob Marley and The Wailers",
+        "Bob Marley"
+      ],
+      "title": "Three Little Birds",
+      "album": "Exodus",
+      "track_number": 9,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick Exodus (1977), not Legend."
+  },
+  {
+    "id": "h-clear-22",
+    "category": "clear",
+    "input": {
+      "filename": "Tom Petty - Free Fallin'.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 256
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Tom Petty",
+      "title": "Free Fallin'",
+      "album": "Full Moon Fever",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick Full Moon Fever (1989), not Greatest Hits."
+  },
+  {
+    "id": "h-clear-23",
+    "category": "clear",
+    "input": {
+      "filename": "Billy Joel - Piano Man.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 339
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Billy Joel",
+      "title": "Piano Man",
+      "album": "Piano Man",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick Piano Man (1973), not Greatest Hits Vol. I & II."
+  },
+  {
+    "id": "h-clear-24",
+    "category": "clear",
+    "input": {
+      "filename": "Led Zeppelin - Stairway to Heaven.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 482
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Led Zeppelin",
+      "title": "Stairway to Heaven",
+      "track_number": 4,
+      "disc_number": null
+    },
+    "notes": "Album left unlabeled because the untitled fourth album has several names."
+  },
+  {
+    "id": "h-clear-25",
+    "category": "clear",
+    "input": {
+      "filename": "Eagles - Hotel California.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 391
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Eagles",
+      "title": "Hotel California",
+      "album": "Hotel California",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-clear-26",
+    "category": "clear",
+    "input": {
+      "filename": "Prince - Purple Rain.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 521
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Prince",
+        "Prince and The Revolution",
+        "Prince & The Revolution"
+      ],
+      "title": "Purple Rain",
+      "album": "Purple Rain",
+      "track_number": 9,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-clear-27",
+    "category": "clear",
+    "input": {
+      "filename": "Toto - Africa.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 295
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Toto",
+      "title": "Africa",
+      "album": "Toto IV",
+      "track_number": 10,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-clear-28",
+    "category": "clear",
+    "input": {
+      "filename": "Billie Eilish - bad guy (Official Music Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 205
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Billie Eilish",
+      "title": "bad guy",
+      "album": "WHEN WE ALL FALL ASLEEP, WHERE DO WE GO?",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "3:25 official music video vs. 3:14 album track (+11s)."
+  },
+  {
+    "id": "h-clear-29",
+    "category": "clear",
+    "input": {
+      "filename": "The Weeknd - Blinding Lights.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 200
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Weeknd",
+      "title": "Blinding Lights",
+      "album": "After Hours",
+      "track_number": 9,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-clear-30",
+    "category": "clear",
+    "input": {
+      "filename": "Japanese Breakfast - Be Sweet.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 195
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Japanese Breakfast",
+      "title": "Be Sweet",
+      "album": "Jubilee",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Indie pop."
+  },
+  {
+    "id": "h-clear-31",
+    "category": "clear",
+    "input": {
+      "filename": "Alvvays - Archie, Marry Me.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 197
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Alvvays",
+      "title": "Archie, Marry Me",
+      "album": "Alvvays",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Indie pop."
+  },
+  {
+    "id": "h-clear-32",
+    "category": "clear",
+    "input": {
+      "filename": "Mitski - Nobody.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 193
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Mitski",
+      "title": "Nobody",
+      "album": "Be the Cowboy",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Indie rock."
+  },
+  {
+    "id": "h-clear-33",
+    "category": "clear",
+    "input": {
+      "filename": "Beach House - Space Song.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 320
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Beach House",
+      "title": "Space Song",
+      "album": "Depression Cherry",
+      "track_number": 3,
+      "disc_number": null
+    },
+    "notes": "Dream pop."
+  },
+  {
+    "id": "h-clear-34",
+    "category": "clear",
+    "input": {
+      "filename": "Massive Attack - Teardrop.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 330
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Massive Attack",
+      "title": "Teardrop",
+      "album": "Mezzanine",
+      "track_number": 3,
+      "disc_number": null
+    },
+    "notes": "Trip-hop."
+  },
+  {
+    "id": "h-clear-35",
+    "category": "clear",
+    "input": {
+      "filename": "Björk - Hyperballad.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 321
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Björk",
+      "title_any_of": [
+        "Hyperballad",
+        "Hyper-Ballad"
+      ],
+      "album": "Post",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Art pop; tests diacritic artist and hyphenated title variant."
+  },
+  {
+    "id": "h-clear-36",
+    "category": "clear",
+    "input": {
+      "filename": "Miles Davis - So What.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 562
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Miles Davis",
+      "title": "So What",
+      "album": "Kind of Blue",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Jazz."
+  },
+  {
+    "id": "h-clear-37",
+    "category": "clear",
+    "input": {
+      "filename": "Buena Vista Social Club - Chan Chan.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 258
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Buena Vista Social Club",
+      "title": "Chan Chan",
+      "album": "Buena Vista Social Club",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Cuban son."
+  },
+  {
+    "id": "h-clear-38",
+    "category": "clear",
+    "input": {
+      "filename": "Bonobo - Kerala (Official Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 237
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Bonobo",
+      "title": "Kerala",
+      "album": "Migration",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Downtempo electronic."
+  },
+  {
+    "id": "h-clear-39",
+    "category": "clear",
+    "input": {
+      "filename": "Stromae - Alors on danse.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 206
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Stromae",
+      "title": "Alors on danse",
+      "album": "Cheese",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "French electronic pop."
+  },
+  {
+    "id": "h-feat-01",
+    "category": "featuring",
+    "input": {
+      "filename": "Rihanna - We Found Love (feat. Calvin Harris).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 215
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Rihanna",
+      "title": "We Found Love",
+      "album": "Talk That Talk",
+      "track_number": null,
+      "disc_number": null,
+      "featuring": [
+        "Calvin Harris"
+      ]
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-feat-02",
+    "category": "featuring",
+    "input": {
+      "filename": "Eminem - Love the Way You Lie ft. Rihanna.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 263
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Eminem",
+      "title": "Love the Way You Lie",
+      "album": "Recovery",
+      "track_number": null,
+      "disc_number": null,
+      "featuring": [
+        "Rihanna"
+      ]
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-feat-03",
+    "category": "featuring",
+    "input": {
+      "filename": "Gotye - Somebody That I Used to Know (feat. Kimbra).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 244
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Gotye",
+      "title": "Somebody That I Used to Know",
+      "album": "Making Mirrors",
+      "track_number": 3,
+      "disc_number": null,
+      "featuring": [
+        "Kimbra"
+      ]
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-feat-04",
+    "category": "featuring",
+    "input": {
+      "filename": "The Chainsmokers ft. Halsey - Closer (Official Lyric Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 245
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Chainsmokers",
+      "title": "Closer",
+      "track_number": null,
+      "disc_number": null,
+      "featuring": [
+        "Halsey"
+      ]
+    },
+    "notes": "Artist ft. Guest - Title shape plus lyric-video noise."
+  },
+  {
+    "id": "h-feat-05",
+    "category": "featuring",
+    "input": {
+      "filename": "Kendrick Lamar - Money Trees (feat. Jay Rock).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 386
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Kendrick Lamar",
+      "title": "Money Trees",
+      "album": "good kid, m.A.A.d city",
+      "track_number": null,
+      "disc_number": null,
+      "featuring": [
+        "Jay Rock"
+      ]
+    },
+    "notes": "Modern hip-hop."
+  },
+  {
+    "id": "h-feat-06",
+    "category": "featuring",
+    "input": {
+      "filename": "Estelle - American Boy (feat. Kanye West).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 284
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Estelle",
+      "title": "American Boy",
+      "album": "Shine",
+      "track_number": null,
+      "disc_number": null,
+      "featuring": [
+        "Kanye West"
+      ]
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-nonlatin-01",
+    "category": "non_latin",
+    "input": {
+      "filename": "鄧麗君 - 月亮代表我的心.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 208
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Teresa Teng {鄧麗君}",
+        "鄧麗君",
+        "邓丽君"
+      ],
+      "title_any_of": [
+        "月亮代表我的心",
+        "The Moon Represents My Heart {月亮代表我的心}"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-nonlatin-02",
+    "category": "non_latin",
+    "input": {
+      "filename": "周杰倫 - 晴天 【官方完整版】.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 270
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Jay Chou {周杰倫}",
+        "周杰倫"
+      ],
+      "title_any_of": [
+        "晴天",
+        "Sunny Day {晴天}"
+      ],
+      "album_any_of": [
+        "葉惠美"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Chinese full-version bracket noise."
+  },
+  {
+    "id": "h-nonlatin-03",
+    "category": "non_latin",
+    "input": {
+      "filename": "米津玄師 - Lemon 【公式MV】.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 274
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Kenshi Yonezu {米津玄師}",
+        "米津玄師"
+      ],
+      "title": "Lemon",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Japanese official MV bracket noise; 4:34 MV vs. 4:15 album track (+19s)."
+  },
+  {
+    "id": "h-nonlatin-04",
+    "category": "non_latin",
+    "input": {
+      "filename": "방탄소년단 - Dynamite (공식 뮤직비디오).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 224
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "BTS {방탄소년단}",
+        "방탄소년단",
+        "BTS"
+      ],
+      "title": "Dynamite",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Korean official MV noise; 3:44 MV vs. 3:19 album track (+25s)."
+  },
+  {
+    "id": "h-nonlatin-05",
+    "category": "non_latin",
+    "input": {
+      "filename": "Кино - Группа крови.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 285
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Kino {Кино}",
+        "Кино"
+      ],
+      "title_any_of": [
+        "Группа крови",
+        "Blood Type {Группа крови}"
+      ],
+      "album_any_of": [
+        "Группа крови",
+        "Blood Type {Группа крови}"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-dl-01",
+    "category": "downloader",
+    "input": {
+      "filename": "Coldplay - Viva La Vida (Official Video).mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "ColdplayVEVO",
+        "title": "Coldplay - Viva La Vida (Official Video)",
+        "comment": "https://www.youtube.com/watch?v=aaaaaaaaaaa"
+      },
+      "duration_seconds": 242
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Coldplay",
+      "title": "Viva la Vida",
+      "track_number": null,
+      "disc_number": null,
+      "downloader_signals": [
+        "url",
+        "vevo_suffix"
+      ],
+      "trusted_artist": false
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-dl-02",
+    "category": "downloader",
+    "input": {
+      "filename": "Sultans of Swing.webm",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Dire Straits - Topic",
+        "title": "Sultans of Swing",
+        "album": "Dire Straits"
+      },
+      "duration_seconds": 348
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Dire Straits",
+      "title": "Sultans of Swing",
+      "album": "Dire Straits",
+      "track_number": 6,
+      "disc_number": null,
+      "downloader_signals": [
+        "topic_suffix"
+      ],
+      "trusted_artist": true
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-dl-03",
+    "category": "downloader",
+    "input": {
+      "filename": "Rosanna.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Retro Hits Channel",
+        "title": "Toto - Rosanna"
+      },
+      "duration_seconds": 331
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Toto",
+      "title": "Rosanna",
+      "album": "Toto IV",
+      "track_number": 1,
+      "disc_number": null,
+      "downloader_signals": [
+        "title_mismatch"
+      ],
+      "trusted_artist": false
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-dl-04",
+    "category": "downloader",
+    "input": {
+      "filename": "Eagles - Take It Easy.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Eagles",
+        "title": "Take It Easy",
+        "purl": "https://www.youtube.com/watch?v=bbbbbbbbbbb"
+      },
+      "duration_seconds": 211
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Eagles",
+      "title": "Take It Easy",
+      "album": "Eagles",
+      "track_number": 1,
+      "disc_number": null,
+      "downloader_signals": [
+        "url"
+      ],
+      "trusted_artist": false
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-dl-05",
+    "category": "downloader",
+    "input": {
+      "filename": "Blue Da Ba Dee.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Night Drive Mixes",
+        "title": "Blue (Da Ba Dee) - Eiffel 65"
+      },
+      "duration_seconds": 283
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Eiffel 65",
+      "title_any_of": [
+        "Blue (Da Ba Dee)",
+        "Blue"
+      ],
+      "track_number": null,
+      "disc_number": null,
+      "downloader_signals": [
+        "title_mismatch"
+      ],
+      "trusted_artist": false
+    },
+    "notes": "Reversed 'Title - Artist' upload; needs the swapped retry."
+  },
+  {
+    "id": "h-pos-01",
+    "category": "positive_control",
+    "input": {
+      "filename": "Pretender.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Official髭男dism",
+        "title": "Pretender"
+      },
+      "duration_seconds": 326
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Official髭男dism",
+        "Official HIGE DANdism {Official髭男dism}"
+      ],
+      "title": "Pretender",
+      "track_number": null,
+      "disc_number": null,
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": "'Official' in the artist name must not be treated as a channel keyword."
+  },
+  {
+    "id": "h-pos-02",
+    "category": "positive_control",
+    "input": {
+      "filename": "Roxy Music - More Than This.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Roxy Music",
+        "title": "More Than This - 2012 Remaster"
+      },
+      "duration_seconds": 270
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Roxy Music",
+      "title": "More Than This",
+      "album": "Avalon",
+      "track_number": 1,
+      "disc_number": null,
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-pos-03",
+    "category": "positive_control",
+    "input": {
+      "filename": "Wolf Like Me.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "TV on the Radio",
+        "title": "Wolf Like Me"
+      },
+      "duration_seconds": 279
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "TV on the Radio",
+      "title": "Wolf Like Me",
+      "album": "Return to Cookie Mountain",
+      "track_number": null,
+      "disc_number": null,
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-pos-04",
+    "category": "positive_control",
+    "input": {
+      "filename": "Controller.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Channel Tres",
+        "title": "Controller"
+      },
+      "duration_seconds": 232
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Channel Tres",
+      "title": "Controller",
+      "track_number": null,
+      "disc_number": null,
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": "'Channel' in the artist name must not be treated as a channel keyword."
+  },
+  {
+    "id": "h-pos-05",
+    "category": "positive_control",
+    "input": {
+      "filename": "Beethoven 5.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Berliner Philharmoniker",
+        "title": "Symphony No. 5 - Allegro con brio",
+        "album": "Beethoven: Symphony No. 5",
+        "track": "1"
+      },
+      "duration_seconds": 440
+    },
+    "expected": {
+      "outcome": "parse_only",
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": "Tagged classical file stays trusted because album and track tags are present."
+  },
+  {
+    "id": "h-hintless-01",
+    "category": "hintless",
+    "input": {
+      "filename": "IMG_1234.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 62
+    },
+    "expected": {
+      "outcome": "skip_lookup"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-hintless-02",
+    "category": "hintless",
+    "input": {
+      "filename": "3f2b9c1e-8a4d-4f6b-9c2e-1d5a7b8e9f00.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 184
+    },
+    "expected": {
+      "outcome": "skip_lookup"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-hintless-03",
+    "category": "hintless",
+    "input": {
+      "filename": "MVI_5678.MOV",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 47
+    },
+    "expected": {
+      "outcome": "skip_lookup"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-hintless-04",
+    "category": "hintless",
+    "input": {
+      "filename": "clip_01.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 128
+    },
+    "expected": {
+      "outcome": "skip_lookup"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-adv-01",
+    "category": "adversarial",
+    "input": {
+      "filename": "Queen - Don't Stop Me Now (Karaoke Version).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 209
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-adv-02",
+    "category": "adversarial",
+    "input": {
+      "filename": "Lady Gaga - Bad Romance (Nightcore).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 230
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-adv-03",
+    "category": "adversarial",
+    "input": {
+      "filename": "Coldplay - The Scientist (Piano Tribute).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 309
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-adv-04",
+    "category": "adversarial",
+    "input": {
+      "filename": "Ed Sheeran - Shape of You (Slowed + Reverb).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 275
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-adv-05",
+    "category": "adversarial",
+    "input": {
+      "filename": "Toto - Hold the Line (8-Bit Version).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 235
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-adv-06",
+    "category": "adversarial",
+    "input": {
+      "filename": "Metallica - Enter Sandman (Lullaby Rendition).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 260
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-adv-07",
+    "category": "adversarial",
+    "input": {
+      "filename": "Green Day - Boulevard of Broken Dreams (Acoustic Cover).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 262
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": ""
+  },
+  {
+    "id": "h-amb-01",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Mad World.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 215
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Tears for Fears",
+      "title": "Mad World",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Title-only query; 3:35 duration matches Tears for Fears against the Gary Jules cover (~3:07)."
+  },
+  {
+    "id": "h-amb-02",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Tainted Love.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 161
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Soft Cell",
+      "title": "Tainted Love",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Title-only query; 2:41 duration distinguishes Soft Cell from Gloria Jones and Marilyn Manson."
+  },
+  {
+    "id": "h-amb-03",
+    "category": "ambiguous",
+    "input": {
+      "filename": "I Will Always Love You.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 271
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Whitney Houston",
+      "title": "I Will Always Love You",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Title-only query; 4:31 duration distinguishes Whitney Houston from Dolly Parton."
+  },
+  {
+    "id": "h-amb-04",
+    "category": "ambiguous",
+    "input": {
+      "filename": "All Along the Watchtower.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 241
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist_any_of": [
+        "The Jimi Hendrix Experience",
+        "Jimi Hendrix"
+      ],
+      "title": "All Along the Watchtower",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Title-only query; 4:01 duration distinguishes Jimi Hendrix from Bob Dylan."
+  },
+  {
+    "id": "h-amb-05",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Chilli Peppers - Californication.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 329
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Red Hot Chili Peppers",
+      "title": "Californication",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Truncated and misspelled artist name."
+  },
+  {
+    "id": "h-amb-06",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Simn Garfunkl - Sound of Silence.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 185
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Simon & Garfunkel",
+      "title_any_of": [
+        "The Sound of Silence",
+        "The Sounds of Silence"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Misspelled artist plus dropped '&' and 'The'."
+  }
+]

@@ -147,6 +147,73 @@ class TrackMetadata:
         return self.album_artist or self.artist
 
 
+class MatchDecision(StrEnum):
+    """Online lookup confidence decision for one track."""
+
+    AUTO_ACCEPT = "auto_accept"
+    AMBIGUOUS = "ambiguous"
+    UNMATCHED = "unmatched"
+    SKIPPED = "skipped"
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseRef:
+    """One concrete release (edition) that contains a candidate recording."""
+
+    release_id: str
+    title: str
+    status: str | None = None
+    date: str | None = None
+    country: str | None = None
+    disambiguation: str | None = None
+    disc_count: int | None = None
+    track_count: int | None = None
+    formats: tuple[str, ...] = ()
+    track_number: int | None = None
+    disc_number: int | None = None
+    medium_track_count: int | None = None
+
+
+@dataclass(slots=True)
+class Candidate:
+    """A provider match candidate at the (recording, release group) level."""
+
+    source: str
+    title: str
+    artist: str
+    lead_artist: str = ""
+    featuring: list[str] = field(default_factory=list)
+    artist_aliases: list[str] = field(default_factory=list)
+    artist_credit: str = ""
+    album: str | None = None
+    album_artist: str | None = None
+    duration_seconds: float | None = None
+    primary_type: str | None = None
+    secondary_types: list[str] = field(default_factory=list)
+    release_group_date: str | None = None
+    recording_id: str | None = None
+    release_group_id: str | None = None
+    artist_id: str | None = None
+    featuring_artist_ids: list[str] = field(default_factory=list)
+    releases: list[ReleaseRef] = field(default_factory=list)
+    chosen_release: ReleaseRef | None = None
+    track_number: int | None = None
+    track_total: int | None = None
+    disc_number: int | None = None
+    disc_total: int | None = None
+    release_date: str | None = None
+    genre: str | None = None
+    artwork_url: str | None = None
+    score: float = 0.0
+    search_rank: int | None = None
+    is_video: bool = False
+
+    @property
+    def release_id(self) -> str | None:
+        """Return the chosen release MBID, if any."""
+        return self.chosen_release.release_id if self.chosen_release else None
+
+
 @dataclass(frozen=True, slots=True)
 class ManualOverrides:
     """Explicit CLI tag overrides pinned verbatim over discovery and lookups."""

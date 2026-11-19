@@ -1,0 +1,849 @@
+[
+  {
+    "id": "t-clear-01",
+    "category": "clear",
+    "input": {
+      "filename": "Daft Punk - One More Time (Official Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 322
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Daft Punk",
+      "title": "One More Time",
+      "album": "Discovery",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Opening track of Discovery (2001); 5:22 official video vs. 5:20 album track; radio edit singles are decoys."
+  },
+  {
+    "id": "t-clear-02",
+    "category": "clear",
+    "input": {
+      "filename": "Michael Jackson - Thriller (Official Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 822
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Michael Jackson",
+      "title": "Thriller",
+      "album": "Thriller",
+      "track_number": 4,
+      "disc_number": null
+    },
+    "notes": "Long narrative official video (~13:42) against the ~5:57 album track."
+  },
+  {
+    "id": "t-clear-03",
+    "category": "clear",
+    "input": {
+      "filename": "Nirvana - Smells Like Teen Spirit (Official Music Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 278
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Nirvana",
+      "title": "Smells Like Teen Spirit",
+      "album": "Nevermind",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Shorter 4:38 radio-edit music video vs. 5:01 album track."
+  },
+  {
+    "id": "t-clear-04",
+    "category": "clear",
+    "input": {
+      "filename": "01 Airbag.mp4",
+      "parent_dirs": [
+        "Radiohead",
+        "OK Computer"
+      ],
+      "tags": {},
+      "duration_seconds": 284
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Radiohead",
+      "title": "Airbag",
+      "album": "OK Computer",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 1 of 3 under Radiohead/OK Computer."
+  },
+  {
+    "id": "t-clear-05",
+    "category": "clear",
+    "input": {
+      "filename": "02 Paranoid Android.mp4",
+      "parent_dirs": [
+        "Radiohead",
+        "OK Computer"
+      ],
+      "tags": {},
+      "duration_seconds": 383
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Radiohead",
+      "title": "Paranoid Android",
+      "album": "OK Computer",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 2 of 3 under Radiohead/OK Computer."
+  },
+  {
+    "id": "t-clear-06",
+    "category": "clear",
+    "input": {
+      "filename": "06 Karma Police.mp4",
+      "parent_dirs": [
+        "Radiohead",
+        "OK Computer"
+      ],
+      "tags": {},
+      "duration_seconds": 261
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Radiohead",
+      "title": "Karma Police",
+      "album": "OK Computer",
+      "track_number": 6,
+      "disc_number": null
+    },
+    "notes": "Folder batch coherence track 3 of 3 under Radiohead/OK Computer."
+  },
+  {
+    "id": "t-clear-07",
+    "category": "clear",
+    "input": {
+      "filename": "2-06 Comfortably Numb.mp4",
+      "parent_dirs": [
+        "Pink Floyd",
+        "The Wall"
+      ],
+      "tags": {},
+      "duration_seconds": 383
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Pink Floyd",
+      "title": "Comfortably Numb",
+      "album": "The Wall",
+      "track_number": 6,
+      "disc_number": 2
+    },
+    "notes": "Disc 2, track 6 of the double album."
+  },
+  {
+    "id": "t-clear-08",
+    "category": "clear",
+    "input": {
+      "filename": "Fleetwood Mac - Dreams.webm",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 257
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Fleetwood Mac",
+      "title": "Dreams",
+      "album": "Rumours",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "t-clear-09",
+    "category": "clear",
+    "input": {
+      "filename": "Taylor Swift - Shake It Off.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 219
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Taylor Swift",
+      "title": "Shake It Off",
+      "album": "1989",
+      "track_number": 6,
+      "disc_number": null
+    },
+    "notes": "Must pick the 2014 standard edition, not 1989 (Taylor's Version) or Deluxe."
+  },
+  {
+    "id": "t-clear-10",
+    "category": "clear",
+    "input": {
+      "filename": "Oasis - Wonderwall (Official Lyric Video) [HD].mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 259
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Oasis",
+      "title": "Wonderwall",
+      "album": "(What's the Story) Morning Glory?",
+      "track_number": 3,
+      "disc_number": null
+    },
+    "notes": "Noisy lyric-video and HD brackets."
+  },
+  {
+    "id": "t-clear-11",
+    "category": "clear",
+    "input": {
+      "filename": "ABBA - Dancing Queen.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 231
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "ABBA",
+      "title": "Dancing Queen",
+      "album": "Arrival",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick Arrival (1976), not ABBA Gold."
+  },
+  {
+    "id": "t-clear-12",
+    "category": "clear",
+    "input": {
+      "filename": "Journey - Don't Stop Believin'.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 251
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Journey",
+      "title": "Don't Stop Believin'",
+      "album": "Escape",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Compilation decoy: must pick Escape (1981), not Greatest Hits."
+  },
+  {
+    "id": "t-clear-13",
+    "category": "clear",
+    "input": {
+      "filename": "Seven Nation Army - The White Stripes.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 232
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The White Stripes",
+      "title": "Seven Nation Army",
+      "album": "Elephant",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Swapped Title - Artist filename (no container tags)."
+  },
+  {
+    "id": "t-clear-14",
+    "category": "clear",
+    "input": {
+      "filename": "Johnny Cash - Folsom Prison Blues (Live).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 162
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Johnny Cash",
+      "title": "Folsom Prison Blues",
+      "album": "At Folsom Prison",
+      "track_number": 1,
+      "disc_number": null
+    },
+    "notes": "Live edition: must pick the At Folsom Prison live album over studio releases."
+  },
+  {
+    "id": "t-clear-15",
+    "category": "clear",
+    "input": {
+      "filename": "Lykke Li - I Follow Rivers (The Magician Remix).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 280
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Lykke Li",
+      "title": "I Follow Rivers",
+      "title_contains": "magician",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Remix edition; title_contains rejects the plain studio version."
+  },
+  {
+    "id": "t-clear-16",
+    "category": "clear",
+    "input": {
+      "filename": "Linkin Park - Numb (Official Music Video) [4K UPGRADE] [kXYiU_JCYtU].mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 188
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Linkin Park",
+      "title": "Numb",
+      "album": "Meteora",
+      "track_number": 13,
+      "disc_number": null
+    },
+    "notes": "Noisy 4K upgrade bracket plus trailing 11-character YouTube ID."
+  },
+  {
+    "id": "t-clear-17",
+    "category": "clear",
+    "input": {
+      "filename": "Phoebe Bridgers - Motion Sickness.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 229
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Phoebe Bridgers",
+      "title": "Motion Sickness",
+      "album": "Stranger in the Alps",
+      "track_number": 2,
+      "disc_number": null
+    },
+    "notes": "Modern indie rock."
+  },
+  {
+    "id": "t-clear-18",
+    "category": "clear",
+    "input": {
+      "filename": "Tame Impala - The Less I Know the Better.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 216
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Tame Impala",
+      "title": "The Less I Know the Better",
+      "album": "Currents",
+      "track_number": 7,
+      "disc_number": null
+    },
+    "notes": "Modern psychedelic pop."
+  },
+  {
+    "id": "t-feat-01",
+    "category": "featuring",
+    "input": {
+      "filename": "Daft Punk - Get Lucky (feat. Pharrell Williams & Nile Rodgers).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 369
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Daft Punk",
+      "title": "Get Lucky",
+      "album": "Random Access Memories",
+      "track_number": 8,
+      "disc_number": null,
+      "featuring": [
+        "Pharrell Williams",
+        "Nile Rodgers"
+      ]
+    },
+    "notes": "Album version duration (6:09); tests multi-guest MusicBrainz credit splitting."
+  },
+  {
+    "id": "t-feat-02",
+    "category": "featuring",
+    "input": {
+      "filename": "Beyoncé - Crazy in Love ft. JAY-Z.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 236
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Beyoncé",
+      "title": "Crazy in Love",
+      "album": "Dangerously in Love",
+      "track_number": 1,
+      "disc_number": null,
+      "featuring": [
+        "Jay-Z"
+      ]
+    },
+    "notes": ""
+  },
+  {
+    "id": "t-feat-03",
+    "category": "featuring",
+    "input": {
+      "filename": "Mark Ronson - Uptown Funk (feat. Bruno Mars).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 270
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Mark Ronson",
+      "title": "Uptown Funk",
+      "album": "Uptown Special",
+      "track_number": null,
+      "disc_number": null,
+      "featuring": [
+        "Bruno Mars"
+      ]
+    },
+    "notes": "Track number left null."
+  },
+  {
+    "id": "t-nonlatin-01",
+    "category": "non_latin",
+    "input": {
+      "filename": "張學友 - 吻別.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 304
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Jacky Cheung {張學友}",
+        "張學友"
+      ],
+      "title_any_of": [
+        "The Goodbye Kiss {吻別}",
+        "吻別"
+      ],
+      "album_any_of": [
+        "The Goodbye Kiss {吻別}",
+        "吻別"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": ""
+  },
+  {
+    "id": "t-nonlatin-02",
+    "category": "non_latin",
+    "input": {
+      "filename": "王菲 - 紅豆 (官方MV).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 256
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Faye Wong {王菲}",
+        "王菲"
+      ],
+      "title_any_of": [
+        "紅豆",
+        "Red Bean {紅豆}"
+      ],
+      "album_any_of": [
+        "唱遊"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Chinese MV bracket noise."
+  },
+  {
+    "id": "t-nonlatin-03",
+    "category": "non_latin",
+    "input": {
+      "filename": "宇多田ヒカル - First Love 【公式MV】.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 258
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "Hikaru Utada {宇多田ヒカル}",
+        "Utada Hikaru {宇多田ヒカル}",
+        "宇多田ヒカル"
+      ],
+      "title": "First Love",
+      "album": "First Love",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Japanese official MV bracket noise."
+  },
+  {
+    "id": "t-nonlatin-04",
+    "category": "non_latin",
+    "input": {
+      "filename": "아이유 - 밤편지 [공식 MV].mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 253
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist_any_of": [
+        "IU {아이유}",
+        "아이유",
+        "IU"
+      ],
+      "title_any_of": [
+        "Through the Night {밤편지}",
+        "밤편지"
+      ],
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Korean [공식 MV] bracket noise."
+  },
+  {
+    "id": "t-dl-01",
+    "category": "downloader",
+    "input": {
+      "filename": "Taylor Swift - Blank Space.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "TaylorSwiftVEVO",
+        "title": "Taylor Swift - Blank Space"
+      },
+      "duration_seconds": 272
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Taylor Swift",
+      "title": "Blank Space",
+      "album": "1989",
+      "track_number": 2,
+      "disc_number": null,
+      "downloader_signals": [
+        "vevo_suffix",
+        "title_mismatch"
+      ],
+      "trusted_artist": false
+    },
+    "notes": "VEVO suffix (Signal 2) plus Signal 3 mismatch; 4:32 music video vs. 3:51 album track (+41s)."
+  },
+  {
+    "id": "t-dl-02",
+    "category": "downloader",
+    "input": {
+      "filename": "Go Your Own Way.webm",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Fleetwood Mac - Topic",
+        "title": "Go Your Own Way",
+        "album": "Rumours"
+      },
+      "duration_seconds": 218
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Fleetwood Mac",
+      "title": "Go Your Own Way",
+      "album": "Rumours",
+      "track_number": 5,
+      "disc_number": null,
+      "downloader_signals": [
+        "topic_suffix"
+      ],
+      "trusted_artist": true
+    },
+    "notes": ""
+  },
+  {
+    "id": "t-dl-03",
+    "category": "downloader",
+    "input": {
+      "filename": "No Surprises.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Lofi Archive Uploads",
+        "title": "Radiohead - No Surprises"
+      },
+      "duration_seconds": 229
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Radiohead",
+      "title": "No Surprises",
+      "album": "OK Computer",
+      "track_number": 10,
+      "disc_number": null,
+      "downloader_signals": [
+        "title_mismatch"
+      ],
+      "trusted_artist": false
+    },
+    "notes": "Signal 3: uploader name does not match either side of the title split."
+  },
+  {
+    "id": "t-pos-01",
+    "category": "positive_control",
+    "input": {
+      "filename": "Lovers Rock.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "TV Girl",
+        "title": "Lovers Rock - Remastered"
+      },
+      "duration_seconds": 213
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "TV Girl",
+      "title": "Lovers Rock",
+      "album": "French Exit",
+      "track_number": null,
+      "disc_number": null,
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": "'TV' in the artist name and a '- Remastered' tail must not trigger any signal."
+  },
+  {
+    "id": "t-pos-02",
+    "category": "positive_control",
+    "input": {
+      "filename": "Heaven's on Fire.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "The Radio Dept.",
+        "title": "Heaven's on Fire"
+      },
+      "duration_seconds": 213
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Radio Dept.",
+      "title": "Heaven's on Fire",
+      "album": "Clinging to a Scheme",
+      "track_number": null,
+      "disc_number": null,
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": "'Radio' in the artist name must not trigger any signal."
+  },
+  {
+    "id": "t-pos-03",
+    "category": "positive_control",
+    "input": {
+      "filename": "Blue Danube.mp4",
+      "parent_dirs": [],
+      "tags": {
+        "artist": "Wiener Philharmoniker",
+        "title": "The Blue Danube - Waltz",
+        "album": "New Year's Concert",
+        "album_artist": "Wiener Philharmoniker"
+      },
+      "duration_seconds": 590
+    },
+    "expected": {
+      "outcome": "parse_only",
+      "downloader_signals": [],
+      "trusted_artist": true
+    },
+    "notes": "Tagged classical file stays trusted because album tags are present."
+  },
+  {
+    "id": "t-hintless-01",
+    "category": "hintless",
+    "input": {
+      "filename": "VID_0042.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 94
+    },
+    "expected": {
+      "outcome": "skip_lookup"
+    },
+    "notes": ""
+  },
+  {
+    "id": "t-hintless-02",
+    "category": "hintless",
+    "input": {
+      "filename": "videoplayback.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 215
+    },
+    "expected": {
+      "outcome": "skip_lookup"
+    },
+    "notes": ""
+  },
+  {
+    "id": "t-adv-01",
+    "category": "adversarial",
+    "input": {
+      "filename": "Adele - Hello (Karaoke Version).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 295
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": "Karaoke upload must never auto-accept the original recording."
+  },
+  {
+    "id": "t-adv-02",
+    "category": "adversarial",
+    "input": {
+      "filename": "Alan Walker - Faded (Nightcore).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 170
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": "Nightcore sped-up edit with artist and title."
+  },
+  {
+    "id": "t-adv-03",
+    "category": "adversarial",
+    "input": {
+      "filename": "John Lennon - Imagine (Piano Tribute).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 185
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": "Piano tribute rendition with artist and title."
+  },
+  {
+    "id": "t-adv-04",
+    "category": "adversarial",
+    "input": {
+      "filename": "Linkin Park - In the End (Slowed + Reverb).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 255
+    },
+    "expected": {
+      "outcome": "no_auto_accept"
+    },
+    "notes": "Slowed + Reverb edit with artist and title."
+  },
+  {
+    "id": "t-amb-01",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Hallelujah.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 413
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Jeff Buckley",
+      "title": "Hallelujah",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Title-only query; 6:53 duration distinguishes Jeff Buckley from Leonard Cohen and Rufus Wainwright."
+  },
+  {
+    "id": "t-amb-02",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Creep.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 239
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Radiohead",
+      "title": "Creep",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Title-only query; 3:59 duration distinguishes Radiohead from TLC and Stone Temple Pilots."
+  },
+  {
+    "id": "t-amb-03",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Respect.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 147
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Aretha Franklin",
+      "title": "Respect",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Title-only query; 2:27 duration distinguishes Aretha Franklin from Otis Redding."
+  },
+  {
+    "id": "t-amb-04",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Fleetwod Mac - Landslide.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 199
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Fleetwood Mac",
+      "title": "Landslide",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Misspelled artist forces unquoted or fallback search."
+  },
+  {
+    "id": "t-amb-05",
+    "category": "ambiguous",
+    "input": {
+      "filename": "Cash - Hurt.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 218
+    },
+    "expected": {
+      "outcome": "top3",
+      "artist": "Johnny Cash",
+      "title": "Hurt",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "Surname-only artist hint."
+  }
+]

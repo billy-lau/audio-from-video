@@ -37,6 +37,10 @@ htmlcov/
 *.log
 extracted_audio/
 .afv-*.part
+*.partial.json
+*.partial.json.tmp
+*.json.gz.tmp
+!tests/fixtures/eval_*.json.gz
 
 # OS and editor noise
 .DS_Store

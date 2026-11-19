@@ -395,6 +395,27 @@ def test_fullwidth_cjk_noise_brackets_stripped() -> None:
     assert h3.artist == "周杰倫"
     assert h3.title == "晴天"
 
+    h4 = parse_hints(_probe("/downloads/방탄소년단 - Dynamite (공식 뮤직비디오).mp4"))
+    assert h4.artist == "방탄소년단"
+    assert h4.title == "Dynamite"
+
+    h5 = parse_hints(_probe("/downloads/아이유 - 밤편지 [공식 MV].mp4"))
+    assert h5.artist == "아이유"
+    assert h5.title == "밤편지"
+
+    h6 = parse_hints(_probe("/downloads/a-ha - Take On Me (Official Video) [Remastered in 4K].mp4"))
+    assert h6.artist == "a-ha"
+    assert h6.title == "Take On Me"
+    assert "remaster" in h6.edition_flags
+
+    h7 = parse_hints(
+        _probe(
+            "/downloads/Linkin Park - Numb (Official Music Video) [4K UPGRADE] [kXYiU_JCYtU].mp4"
+        )
+    )
+    assert h7.artist == "Linkin Park"
+    assert h7.title == "Numb"
+
 
 def test_parent_hints_skip_user_home_directory() -> None:
     hints = parse_hints(_probe("/Users/alice/my_clips/song.mp4"))
