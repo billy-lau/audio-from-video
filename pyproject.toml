@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "audio-from-video"
 version = "0.1.0"
 description = "Extract high-fidelity MP3 audio from video files with verified metadata, ID3v2.3 tags, and clean cross-platform naming."
+readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]

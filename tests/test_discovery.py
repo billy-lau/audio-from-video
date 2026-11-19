@@ -146,3 +146,39 @@ def test_folder_scans_skip_dotfiles_and_hidden_directories(tmp_path: Path) -> No
     explicit_dot = tmp_path / ".hidden.mkv"
     items_explicit, _ = discover_inputs([explicit_dot])
     assert [i.path.name for i in items_explicit] == [".hidden.mkv"]
+
+
+def test_unexpanded_wildcards_are_expanded_as_explicit_files(tmp_path: Path) -> None:
+    for name in ("b.mp4", "a.mp4", "c.mkv"):
+        (tmp_path / name).write_bytes(b"x")
+    literal = tmp_path / "song [live].mp4"
+    literal.write_bytes(b"x")
+
+    # Windows shells (and quoted POSIX args) pass '*.mp4' through literally.
+    media, root = discover_inputs([tmp_path / "*.mp4"])
+    assert [m.path.name for m in media] == ["a.mp4", "b.mp4", "song [live].mp4"]
+    assert all(m.from_directory_scan is False for m in media)
+    assert root == (tmp_path / "extracted_audio").resolve()
+
+    # An existing path containing glob characters is used as-is, not as a pattern.
+    media_literal, _ = discover_inputs([literal])
+    assert [m.path.name for m in media_literal] == ["song [live].mp4"]
+
+    with pytest.raises(DiscoveryError, match="No files match"):
+        discover_inputs([tmp_path / "*.webm"])
+
+
+def test_wildcards_under_bracketed_folders_and_recursive_double_star(tmp_path: Path) -> None:
+    album = tmp_path / "br" / "Album [2001]"
+    album.mkdir(parents=True)
+    for name in ("a.mp4", "b.mp4"):
+        (album / name).write_bytes(b"x")
+    media, _ = discover_inputs([album / "*.mp4"], output_dir=tmp_path / "out")
+    assert [m.path.name for m in media] == ["a.mp4", "b.mp4"]
+
+    deep = tmp_path / "pf" / "x" / "y"
+    deep.mkdir(parents=True)
+    (deep / "deep.mp4").write_bytes(b"x")
+    (tmp_path / "pf" / "top.mp4").write_bytes(b"x")
+    media_deep, _ = discover_inputs([tmp_path / "pf" / "**" / "*.mp4"], output_dir=tmp_path / "out")
+    assert sorted(m.path.name for m in media_deep) == ["deep.mp4", "top.mp4"]

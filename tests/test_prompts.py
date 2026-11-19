@@ -72,10 +72,14 @@ def test_real_console_input_shows_literal_option_keys_and_bracketed_filenames(
     chosen = callbacks.select_edition(media, _candidate("A", "Song", "X"), [ed1, ed2], ed1)
     assert chosen == ed1
 
-    alias = callbacks.resolve_non_latin_alias(media, "album", "[re:Stacks] 吻別", "album 'x'")
+    alias = callbacks.resolve_non_latin_alias(
+        media, "album", "[re:Stacks] :fire: 吻別", "album 'x'"
+    )
     assert alias.action == AliasAction.KEEP_ITEM
 
     out = buf.getvalue()
+    assert ":fire:" in out
+    assert "\U0001f525" not in out
     for literal in ("[s] manual search", "[m] custom tags", "[f] fallback", "[k] skip", "[F]"):
         assert literal in out
     assert "Song [live] [b].mp4" in out
@@ -366,3 +370,106 @@ def test_manual_search_without_results_keeps_previous_candidates_and_fallback_al
     assert any("no candidates" in n for n in notices)
     assert len(plan) == 3
     assert all(item.candidate is None for item in plan)
+
+
+def test_always_prompt_keeps_confident_matches_after_fallback_all_and_outage(
+    tmp_path: Path, ffprobe_path: Path
+) -> None:
+    from audio_from_video.discovery import discover_inputs
+    from audio_from_video.planner import CandidatePromptResponse
+
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    for name in ("a_uncertain.mp4", "b_confident.mp4", "c_uncertain.mp4"):
+        make_video_with_audio(videos / name)
+
+    confident = _candidate("Taylor Swift", "Shake It Off", "1989")
+    confident_meta = TrackMetadata(
+        artist="Taylor Swift",
+        title="Shake It Off",
+        album="1989",
+        album_artist="Taylor Swift",
+        track_number=6,
+        match_status=MatchStatus.EXACT,
+        source_description="musicbrainz",
+    )
+
+    class _Resolver:
+        def __init__(self, unavailable: bool) -> None:
+            self.providers_unavailable = unavailable
+
+        def resolve_batch(self, items: Any, *, on_progress: Any = None) -> list[MatchResult]:
+            results = []
+            for item in items:
+                if "confident" in str(item.source_path):
+                    results.append(
+                        MatchResult(
+                            decision=MatchDecision.AUTO_ACCEPT,
+                            best=confident,
+                            alternatives=[],
+                            score=0.97,
+                            margin=0.5,
+                            queries_tried=[],
+                            metadata=confident_meta,
+                        )
+                    )
+                else:
+                    results.append(
+                        MatchResult(
+                            decision=MatchDecision.AMBIGUOUS,
+                            best=_candidate("X", "Y", "Z"),
+                            alternatives=[],
+                            score=0.6,
+                            margin=0.0,
+                            queries_tried=[],
+                            metadata=TrackMetadata(),
+                        )
+                    )
+            return results
+
+    media_inputs, output_root = discover_inputs([videos], output_dir=tmp_path / "out")
+    cfg = load_config(config_path=tmp_path / "missing.toml", env={})
+
+    # 1. [F] on the first (uncertain) file: the confident file is still applied.
+    prompted: list[str] = []
+
+    def _press_f(media: MediaInput, *_rest: Any) -> CandidatePromptResponse:
+        prompted.append(media.path.name)
+        return CandidatePromptResponse(action=CandidateAction.USE_FALLBACK_ALL)
+
+    plan = build_plan(
+        media_inputs,
+        output_root=output_root,
+        ffprobe_path=ffprobe_path,
+        config=cfg,
+        resolver=_Resolver(unavailable=False),  # type: ignore[arg-type]
+        always_prompt=True,
+        non_interactive=False,
+        keep_native_missing=True,
+        prompt_callbacks=PromptCallbacks(resolve_match=_press_f),
+    )
+    assert prompted == ["a_uncertain.mp4"]
+    by_name = {item.media_input.path.name: item for item in plan}
+    assert by_name["b_confident.mp4"].candidate is confident
+    assert by_name["b_confident.mp4"].metadata is not None
+    assert by_name["b_confident.mp4"].metadata.album == "1989"
+    assert by_name["c_uncertain.mp4"].candidate is None
+
+    # 2. Outage under --always-prompt: no prompts, confident matches still applied.
+    def _never(*_args: Any) -> Any:
+        raise AssertionError("must not prompt during an outage")
+
+    plan_outage = build_plan(
+        media_inputs,
+        output_root=output_root,
+        ffprobe_path=ffprobe_path,
+        config=cfg,
+        resolver=_Resolver(unavailable=True),  # type: ignore[arg-type]
+        always_prompt=True,
+        non_interactive=False,
+        keep_native_missing=True,
+        prompt_callbacks=PromptCallbacks(resolve_match=_never),
+    )
+    outage_by_name = {item.media_input.path.name: item for item in plan_outage}
+    assert outage_by_name["b_confident.mp4"].candidate is confident
+    assert outage_by_name["a_uncertain.mp4"].candidate is None

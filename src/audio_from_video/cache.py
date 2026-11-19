@@ -67,6 +67,14 @@ def _table(namespace: str) -> str:
     return f"{namespace}_cache"
 
 
+def find_corrupt_backups(cache_path: Path | str) -> list[Path]:
+    """List moved-aside corrupt copies of a cache file (including -wal and -shm sidecars)."""
+    path = Path(cache_path)
+    if not path.parent.is_dir():
+        return []
+    return sorted(path.parent.glob(f"{path.name}*.corrupt-*"))
+
+
 _CORRUPTION_PHRASES: tuple[str, ...] = (
     "not a database",
     "malformed",
@@ -152,14 +160,15 @@ class TTLCache:
                 self.warning = (
                     f"Cache file was unreadable ({exc}); moved it aside and started a new cache."
                 )
-                logger.warning(self.warning)
+                # Callers surface self.warning once; log at DEBUG to avoid duplicate output.
+                logger.debug(self.warning)
                 return
             except (sqlite3.Error, OSError) as retry_exc:
                 exc = retry_exc
         self._conn = None
         self.disabled = True
         self.warning = f"Cache disabled for this run: {exc}"
-        logger.warning(self.warning)
+        logger.debug(self.warning)
 
     def _fail(self, exc: BaseException) -> None:
         if not self.disabled:
@@ -291,6 +300,8 @@ class TTLCache:
                     cur = self._conn.execute(f"DELETE FROM {table}")
                 removed += max(cur.rowcount, 0)
             self._conn.execute("VACUUM")
+            # Fold the WAL back into the main file and truncate it so disk space is reclaimed.
+            self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         return removed
 
     def stats(self) -> list[NamespaceStats]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import glob
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -35,6 +36,50 @@ def _is_same_or_child(candidate: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+_GLOB_CHARS = ("*", "?", "[")
+
+
+def _pattern_with_literal_prefix(candidate: Path) -> str:
+    """Escape the longest existing directory prefix so names like 'Album [2001]' stay literal."""
+    parts = candidate.parts
+    split = 0
+    for idx in range(len(parts) - 1, 0, -1):
+        if Path(*parts[:idx]).is_dir():
+            split = idx
+            break
+    if split == 0:
+        return str(candidate)
+    prefix = glob.escape(str(Path(*parts[:split])))
+    return os.path.join(prefix, *parts[split:])
+
+
+def expand_input_patterns(inputs: Sequence[Path]) -> list[Path]:
+    """Expand wildcard inputs (e.g., '*.mp4' or 'dir/**/*.mkv') the shell left unexpanded.
+
+    Windows shells pass wildcards through literally, and POSIX shells do so when the
+    pattern is quoted. Existing paths are never treated as patterns, so a file literally
+    named 'song [live].mp4' still works, and existing parent folders such as
+    'Album [2001]/' are matched literally. '**' matches any number of subfolders.
+    Matches count as explicit file arguments.
+    """
+    expanded: list[Path] = []
+    for raw in inputs:
+        candidate = raw.expanduser()
+        text = str(candidate)
+        if candidate.exists() or not any(ch in text for ch in _GLOB_CHARS):
+            expanded.append(raw)
+            continue
+        pattern = _pattern_with_literal_prefix(candidate)
+        matches = sorted(
+            (Path(m) for m in glob.glob(pattern, recursive=True)),
+            key=sort_key_path,
+        )
+        if not matches:
+            raise DiscoveryError(f"No files match the pattern: {raw}")
+        expanded.extend(matches)
+    return expanded
 
 
 def resolve_output_root(
@@ -95,6 +140,7 @@ def discover_inputs(
 
     Returns (sorted_media_inputs, resolved_output_root).
     """
+    inputs = expand_input_patterns(inputs)
     output_root = resolve_output_root(inputs, output_dir=output_dir)
 
     # Map resolved path -> from_directory_scan. Explicit paths (False) take precedence

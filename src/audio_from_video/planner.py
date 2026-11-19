@@ -458,12 +458,17 @@ def _resolve_online_entry(
         if not session.outage_notified:
             session.outage_notified = True
             _notify(
-                "Online providers are unreachable; using offline fallback metadata for the "
-                "remaining tracks without prompting (use --artist, --album, or --title to "
-                "pin tags)."
+                "Online providers are unreachable; confident matches are still applied, and "
+                "the remaining uncertain tracks use offline fallback metadata without prompting "
+                "(use --artist, --album, or --title to pin tags)."
             )
     if can_prompt and session.fallback_all:
         can_prompt = False
+
+    # Without a prompt (non-interactive, [F], or an outage), confident matches are applied
+    # exactly as they would be without --always-prompt; only uncertain ones fall back.
+    if not can_prompt and match_result.decision == MatchDecision.AUTO_ACCEPT:
+        return match_result.metadata, match_result.best, top_candidates, None, None
 
     if can_prompt:
         assert callbacks is not None and callbacks.resolve_match is not None

@@ -29,6 +29,13 @@ from audio_from_video.planner import (
 )
 
 MAX_DISPLAY_CANDIDATES = 5
+
+
+def _emit(console: Console, *objects: object, **kwargs: object) -> None:
+    """Print without emoji-code replacement, so values like ':fire:' stay literal."""
+    console.print(*objects, emoji=False, **kwargs)  # type: ignore[arg-type]
+
+
 EDITION_PAGE_SIZE = 10
 
 
@@ -39,7 +46,7 @@ def _make_reader(console: Console, input_fn: Callable[[str], str] | None) -> Cal
     def _read(prompt: str) -> str:
         # Prompts contain literal "[s]"-style option keys and user filenames, so they must
         # never be interpreted as Rich markup.
-        return console.input(prompt, markup=False)
+        return console.input(prompt, markup=False, emoji=False)
 
     return _read
 
@@ -79,16 +86,18 @@ def prompt_mb_contact(
     *,
     console: Console,
     input_fn: Callable[[str], str] | None = None,
+    cancel_hint: str = "Type 'q' to cancel (or re-run with --offline).",
 ) -> str:
     """Prompt once interactively for a reachable MusicBrainz contact and validate it."""
     read = _make_reader(console, input_fn)
-    console.print(
+    _emit(
+        console,
         "[bold cyan]MusicBrainz contact setup[/bold cyan]\n"
         "MusicBrainz requires an identifying User-Agent with a reachable contact "
         "(an anonymous email relay such as Apple Hide My Email, SimpleLogin, or Duck Address, "
         "or a public repository URL).\n"
         "This will be saved locally in config.toml and never shared in git. "
-        "Type 'q' to cancel (or re-run with --offline)."
+        f"{escape(cancel_hint)}",
     )
     while True:
         try:
@@ -100,7 +109,7 @@ def prompt_mb_contact(
         try:
             return validate_mb_contact(raw)
         except ConfigError as exc:
-            console.print(f"[red]Invalid contact:[/red] {escape(str(exc))}")
+            _emit(console, f"[red]Invalid contact:[/red] {escape(str(exc))}")
 
 
 def _format_candidate_date(cand: Candidate) -> str:
@@ -160,7 +169,7 @@ def make_rich_prompt_callbacks(
                 f"{stream.sample_rate} Hz" if stream.sample_rate else "—",
                 "yes" if is_pick else "",
             )
-        console.print(table)
+        _emit(console, table)
 
         while True:
             try:
@@ -173,7 +182,7 @@ def make_rich_prompt_callbacks(
                 choice = int(raw)
                 if 1 <= choice <= len(streams):
                     return streams[choice - 1]
-            console.print(f"[yellow]Enter a number from 1 to {len(streams)}.[/yellow]")
+            _emit(console, f"[yellow]Enter a number from 1 to {len(streams)}.[/yellow]")
 
     def _resolve_match(
         media_input: MediaInput,
@@ -198,9 +207,10 @@ def make_rich_prompt_callbacks(
             hint_bits.append(f"album={hints.album}")
         hint_summary = ", ".join(hint_bits) if hint_bits else "none"
 
-        console.print(
+        _emit(
+            console,
             f"\n[bold cyan]{escape(reason)}:[/bold cyan] {escape(media_input.path.name)} "
-            f"[dim](hints: {escape(hint_summary)})[/dim]"
+            f"[dim](hints: {escape(hint_summary)})[/dim]",
         )
 
         if shown:
@@ -224,7 +234,7 @@ def make_rich_prompt_callbacks(
                     escape(_format_candidate_track(cand)),
                     escape(cand.source),
                 )
-            console.print(table)
+            _emit(console, table)
 
         default_auto = (
             always_prompt and match_result.decision == MatchDecision.AUTO_ACCEPT and bool(shown)
@@ -233,7 +243,8 @@ def make_rich_prompt_callbacks(
         range_hint = f"[1-{len(shown)}] pick, " if shown else ""
         prompt_text = (
             f"{range_hint}[s] manual search, [m] custom tags, [f] fallback, "
-            f"[F] fallback for all remaining, or [k] skip [{default_label}]: "
+            f"[F] stop asking (fallback for remaining uncertain tracks), "
+            f"or [k] skip [{default_label}]: "
         )
 
         while True:
@@ -268,7 +279,7 @@ def make_rich_prompt_callbacks(
                 except EOFError:
                     return CandidatePromptResponse(action=CandidateAction.USE_FALLBACK)
                 if not s_title:
-                    console.print("[yellow]Title is required for manual search.[/yellow]")
+                    _emit(console, "[yellow]Title is required for manual search.[/yellow]")
                     continue
                 return CandidatePromptResponse(
                     action=CandidateAction.MANUAL_SEARCH,
@@ -290,11 +301,12 @@ def make_rich_prompt_callbacks(
                     if m_track_raw.isdigit() and int(m_track_raw) > 0:
                         m_track = int(m_track_raw)
                     else:
-                        console.print(
-                            "[yellow]Track number must be a positive integer; ignoring.[/yellow]"
+                        _emit(
+                            console,
+                            "[yellow]Track number must be a positive integer; ignoring.[/yellow]",
                         )
                 if not m_title:
-                    console.print("[yellow]Title is required for custom tags.[/yellow]")
+                    _emit(console, "[yellow]Title is required for custom tags.[/yellow]")
                     continue
                 custom = TrackMetadata(
                     artist=m_artist,
@@ -315,7 +327,7 @@ def make_rich_prompt_callbacks(
             if low == "k":
                 return CandidatePromptResponse(action=CandidateAction.SKIP_TRACK)
 
-            console.print("[yellow]Invalid choice; try again.[/yellow]")
+            _emit(console, "[yellow]Invalid choice; try again.[/yellow]")
 
     def _select_edition(
         media_input: MediaInput,
@@ -357,7 +369,7 @@ def make_rich_prompt_callbacks(
                     str(count),
                     "yes" if idx == default_pos else "",
                 )
-            console.print(table)
+            _emit(console, table)
 
         _render_page()
         paging_hint = ", [n] next page, [p] previous page" if page_count > 1 else ""
@@ -379,7 +391,7 @@ def make_rich_prompt_callbacks(
                 page = (page + (1 if raw.lower() == "n" else -1)) % page_count
                 _render_page()
                 continue
-            console.print(f"[yellow]Enter a number from 1 to {len(reps)}.[/yellow]")
+            _emit(console, f"[yellow]Enter a number from 1 to {len(reps)}.[/yellow]")
 
     def _resolve_non_latin_alias(
         media_input: MediaInput,
@@ -387,10 +399,11 @@ def make_rich_prompt_callbacks(
         original_value: str,
         scope_label: str,
     ) -> AliasPromptResponse:
-        console.print(
+        _emit(
+            console,
             f"[bold]Missing English alias[/bold] for [cyan]{escape(field_kind)}[/cyan] "
             f"[yellow]{escape(original_value)}[/yellow] "
-            f"[dim]({escape(media_input.path.name)})[/dim]"
+            f"[dim]({escape(media_input.path.name)})[/dim]",
         )
         prompt_text = (
             f"[a] enter English alias, [k] keep native for this item, "
@@ -417,10 +430,10 @@ def make_rich_prompt_callbacks(
                         action=AliasAction.USE_ENGLISH, english_value=entered
                     )
                 return AliasPromptResponse(action=AliasAction.KEEP_ITEM)
-            console.print("[yellow]Choose a, k, A, or K.[/yellow]")
+            _emit(console, "[yellow]Choose a, k, A, or K.[/yellow]")
 
     def _notify(message: str) -> None:
-        console.print(f"[yellow]Notice:[/yellow] {escape(message)}")
+        _emit(console, f"[yellow]Notice:[/yellow] {escape(message)}")
 
     return PromptCallbacks(
         select_stream=_select_stream,

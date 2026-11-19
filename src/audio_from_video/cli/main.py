@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ from typer.core import TyperGroup
 from audio_from_video import __version__
 from audio_from_video.artwork import ArtworkFetcher
 from audio_from_video.binaries import MissingBinaryError, resolve_binaries
-from audio_from_video.cache import CACHE_FILENAME, TTLCache
+from audio_from_video.cache import CACHE_FILENAME, TTLCache, find_corrupt_backups
 from audio_from_video.cli.doctor import run_doctor
 from audio_from_video.cli.prompts import make_rich_prompt_callbacks, prompt_mb_contact
 from audio_from_video.cli.rendering import render_plan_table, render_summary
@@ -39,6 +40,8 @@ from audio_from_video.config import (
     resolve_mb_user_agent,
     save_mb_contact,
     validate_jobs,
+    validate_mb_contact,
+    write_config_template,
 )
 from audio_from_video.discovery import (
     DiscoveryError,
@@ -97,7 +100,7 @@ config_app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 cache_app = typer.Typer(
-    help="Inspect or clear the SQLite TTL cache (clear arrives in Phase 4).",
+    help="Inspect or clear the SQLite TTL cache.",
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
@@ -286,8 +289,8 @@ def extract_command(
     ] = None,
 ) -> None:
     """Extract, tag, name, and organize MP3 audio from one or more video files."""
-    out_console = Console()
-    err_console = Console(stderr=True)
+    out_console = Console(emoji=False)
+    err_console = Console(stderr=True, emoji=False)
     configure_logging(verbosity=verbose, quiet=quiet, log_file=log_file, console=err_console)
 
     try:
@@ -583,8 +586,8 @@ def extract_command(
 @app.command(name="doctor")
 def doctor_command() -> None:
     """Verify ffmpeg, ffprobe, libmp3lame, MusicBrainz contact, and cache writability."""
-    out_console = Console()
-    err_console = Console(stderr=True)
+    out_console = Console(emoji=False)
+    err_console = Console(stderr=True, emoji=False)
     try:
         cfg = load_config()
     except ConfigError as exc:
@@ -601,24 +604,137 @@ def config_path_command() -> None:
     typer.echo(str(default_config_path()))
 
 
+@config_app.command(name="init")
+def config_init_command(
+    contact: Annotated[
+        str | None,
+        typer.Option(
+            "--contact",
+            help="MusicBrainz contact (email relay or public repository URL) to save.",
+        ),
+    ] = None,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help="Replace an existing config.toml with a fresh template (keeps a .bak copy).",
+        ),
+    ] = False,
+) -> None:
+    """Create a commented config.toml, prompting for the MusicBrainz contact on a terminal."""
+    out_console = Console(emoji=False)
+    err_console = Console(stderr=True, emoji=False)
+    path = default_config_path()
+
+    validated: str | None = None
+    if contact is not None:
+        try:
+            validated = validate_mb_contact(contact)
+        except ConfigError as exc:
+            err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+            raise typer.Exit(code=2) from exc
+
+    def _ask_contact() -> str | None:
+        if not _is_interactive_tty():
+            return None
+        try:
+            return prompt_mb_contact(
+                console=out_console,
+                cancel_hint="Type 'q' to skip; online lookups need a contact later.",
+            )
+        except MissingContactError:
+            return None
+        except KeyboardInterrupt as kb_exc:
+            raise typer.Exit(code=130) from kb_exc
+
+    try:
+        if path.exists() and not force:
+            if validated is None:
+                try:
+                    existing = load_config(config_path=path, env={})
+                except ConfigError as exc:
+                    err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+                    raise typer.Exit(code=2) from exc
+                if existing.musicbrainz.contact:
+                    out_console.print(
+                        f"Config already exists at {escape(str(path))} with a MusicBrainz "
+                        "contact. Use --force to replace it with a fresh template."
+                    )
+                    raise typer.Exit(code=0)
+                validated = _ask_contact()
+            if validated is None:
+                out_console.print(
+                    f"Config already exists at {escape(str(path))}. Re-run with "
+                    "--contact <email-or-url> to set the MusicBrainz contact, or use --force "
+                    "to replace it with a fresh template."
+                )
+                raise typer.Exit(code=0)
+            save_mb_contact(validated, path)
+            out_console.print(f"[green]Saved MusicBrainz contact to {escape(str(path))}.[/green]")
+            raise typer.Exit(code=0)
+
+        if validated is None and path.exists() and force:
+            # Keep the contact already saved, so --force never breaks scripted online runs.
+            try:
+                previous = load_config(config_path=path, env={}).musicbrainz.contact
+            except ConfigError:
+                previous = None
+            if previous:
+                validated = previous
+                out_console.print("Kept the existing MusicBrainz contact.")
+        if validated is None:
+            validated = _ask_contact()
+        if path.exists() and force:
+            backup = path.with_name(path.name + ".bak")
+            shutil.copy2(path, backup)
+            out_console.print(f"Backed up the previous config to {escape(str(backup))}.")
+        write_config_template(path, contact=validated, force=True)
+    except ConfigError as exc:
+        err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
+        raise typer.Exit(code=2) from exc
+    except OSError as exc:
+        err_console.print(
+            f"[red]Error:[/red] Could not write {escape(str(path))}: {escape(str(exc))}"
+        )
+        raise typer.Exit(code=1) from exc
+
+    out_console.print(f"[green]Created {escape(str(path))}.[/green]")
+    if validated is None:
+        out_console.print(
+            "[yellow]No MusicBrainz contact set yet.[/yellow] Online lookups need one: run "
+            "'afv config init --contact <email-or-url>', export AFV_MB_CONTACT, or use --offline."
+        )
+
+
 @config_app.command(name="show")
 def config_show_command() -> None:
-    """Display resolved configuration values."""
-    err_console = Console(stderr=True)
+    """Display resolved configuration values (config.toml plus environment overrides)."""
+    err_console = Console(stderr=True, emoji=False)
     try:
         cfg = load_config()
     except ConfigError as exc:
         err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from exc
 
-    typer.echo(f"config_path = {cfg.config_path}")
+    exists = "" if cfg.config_path.is_file() else " (not created yet; showing defaults)"
+    typer.echo(f"config_path = {cfg.config_path}{exists}")
+    typer.echo(f"musicbrainz.contact = {cfg.musicbrainz.contact or '(not set)'}")
+    typer.echo(f"musicbrainz.user_agent = {cfg.musicbrainz.user_agent_override or '(default)'}")
     typer.echo(f"audio.quality = {cfg.audio.quality}")
     typer.echo(f"audio.copy_mp3 = {cfg.audio.copy_mp3}")
+    typer.echo(f"audio.loudnorm_mode = {cfg.audio.loudnorm_mode}")
+    typer.echo(f"audio.loudnorm_i = {cfg.audio.loudnorm_i}")
+    typer.echo(f"audio.loudnorm_tp = {cfg.audio.loudnorm_tp}")
+    typer.echo(f"audio.loudnorm_lra = {cfg.audio.loudnorm_lra}")
     typer.echo(f"output.output_dir = {cfg.output.output_dir or '(default)'}")
     typer.echo(f"output.flat = {cfg.output.flat}")
     typer.echo(f"output.on_conflict = {cfg.output.on_conflict.value}")
     typer.echo(f"execution.jobs = {cfg.execution.jobs}")
-    typer.echo(f"musicbrainz.contact = {cfg.musicbrainz.contact or '(not set)'}")
+    typer.echo(f"matching.auto_accept_score = {cfg.matching.auto_accept_score}")
+    typer.echo(f"matching.min_margin = {cfg.matching.min_margin}")
+    typer.echo(f"matching.ambiguous_floor = {cfg.matching.ambiguous_floor}")
+    typer.echo(f"binaries.ffmpeg = {cfg.binaries.ffmpeg_path or '(PATH)'}")
+    typer.echo(f"binaries.ffprobe = {cfg.binaries.ffprobe_path or '(PATH)'}")
 
 
 def _format_bytes(num_bytes: int) -> str:
@@ -639,6 +755,7 @@ def cache_stats_command() -> None:
     cache_file = cache_dir / CACHE_FILENAME
     if not cache_file.is_file():
         typer.echo("Cache is empty (no cache file has been created yet).")
+        _echo_corrupt_backups(cache_file)
         return
     try:
         stats = TTLCache.read_stats(cache_file)
@@ -666,6 +783,105 @@ def cache_stats_command() -> None:
     typer.echo(
         f"{'Total':<14} rows={total_rows:<6} expired={total_expired:<6} "
         f"size={_format_bytes(total_bytes)}"
+    )
+    _echo_corrupt_backups(cache_file)
+
+
+def _echo_corrupt_backups(cache_file: Path) -> None:
+    backups = find_corrupt_backups(cache_file)
+    if backups:
+        size = sum(_safe_size(p) for p in backups)
+        typer.echo(
+            f"Moved-aside corrupt cache files: {len(backups)} ({_format_bytes(size)}); "
+            "'afv cache clear' deletes them."
+        )
+
+
+def _safe_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _cache_files_size(cache_file: Path) -> int:
+    """Total on-disk size of the cache database, its sidecars, and corrupt backups."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        total += _safe_size(Path(f"{cache_file}{suffix}"))
+    return total + sum(_safe_size(p) for p in find_corrupt_backups(cache_file))
+
+
+def _delete_corrupt_backups(cache_file: Path) -> int:
+    removed = 0
+    for backup in find_corrupt_backups(cache_file):
+        try:
+            backup.unlink()
+            removed += 1
+        except OSError as exc:
+            typer.echo(f"Could not delete {backup}: {exc}", err=True)
+    return removed
+
+
+@cache_app.command(name="clear")
+def cache_clear_command(
+    expired_only: Annotated[
+        bool,
+        typer.Option("--expired-only", help="Remove only expired rows instead of everything."),
+    ] = False,
+) -> None:
+    """Delete cached rows (all, or only expired ones), then VACUUM to reclaim disk space.
+
+    Moved-aside corrupt cache files are deleted as well.
+    """
+    cache_dir = default_cache_dir()
+    cache_file = cache_dir / CACHE_FILENAME
+    typer.echo(f"Cache directory: {cache_dir}")
+    if not cache_file.is_file():
+        deleted = _delete_corrupt_backups(cache_file)
+        if deleted:
+            typer.echo(f"Deleted {deleted} moved-aside corrupt cache file(s).")
+        typer.echo("Cache is empty (no cache file has been created yet).")
+        return
+
+    before_rows = 0
+    before_expired = 0
+    try:
+        for entry in TTLCache.read_stats(cache_file):
+            before_rows += entry.rows
+            before_expired += entry.expired
+    except (OSError, sqlite3.Error):
+        # A corrupt file is moved aside and recreated when TTLCache opens it below.
+        pass
+    size_before = _cache_files_size(cache_file)
+
+    cache = TTLCache(cache_file)
+    try:
+        if cache.warning:
+            typer.echo(f"Warning: {cache.warning}", err=True)
+        if cache.disabled:
+            typer.echo("Could not open the cache for clearing.", err=True)
+            raise typer.Exit(code=1)
+        try:
+            cache.clear(expired_only=expired_only)
+        except sqlite3.Error as exc:
+            typer.echo(f"Could not clear cache: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+    finally:
+        cache.close()
+
+    deleted_backups = _delete_corrupt_backups(cache_file)
+    removed = before_expired if expired_only else before_rows
+    size_after = _cache_files_size(cache_file)
+    scope = "expired " if expired_only else ""
+    backups_note = (
+        f" and {deleted_backups} moved-aside corrupt file{'s' if deleted_backups != 1 else ''}"
+        if deleted_backups
+        else ""
+    )
+    typer.echo(
+        f"Removed {removed} {scope}row{'s' if removed != 1 else ''}{backups_note}; cache size "
+        f"{_format_bytes(size_before)} -> {_format_bytes(size_after)}."
     )
 
 

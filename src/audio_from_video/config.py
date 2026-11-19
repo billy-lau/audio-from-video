@@ -435,6 +435,15 @@ def load_config(
 
 _TABLE_HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*(?:#.*)?$")
 _CONTACT_KEY_RE = re.compile(r"^\s*contact\s*=")
+_COMMENTED_CONTACT_RE = re.compile(r"^\s*#\s*contact\s*=")
+
+
+def _insert_before_trailing_blanks(lines: list[str], new_line: str) -> None:
+    """Append new_line to a section, keeping any blank separator lines after it."""
+    idx = len(lines)
+    while idx > 0 and not lines[idx - 1].strip():
+        idx -= 1
+    lines.insert(idx, new_line)
 
 
 def save_mb_contact(contact: str, config_path: Path | None = None) -> Path:
@@ -449,13 +458,24 @@ def save_mb_contact(contact: str, config_path: Path | None = None) -> Path:
     in_mb = False
     found_mb = False
     replaced_contact = False
+    commented_idx: int | None = None
+
+    def _finish_mb_section() -> None:
+        nonlocal replaced_contact
+        if replaced_contact:
+            return
+        if commented_idx is not None:
+            # Replace the template's commented placeholder in place.
+            out_lines[commented_idx] = contact_line
+        else:
+            _insert_before_trailing_blanks(out_lines, contact_line)
+        replaced_contact = True
 
     for line in existing_lines:
         header = _TABLE_HEADER_RE.match(line)
         if header:
-            if in_mb and not replaced_contact:
-                out_lines.append(contact_line)
-                replaced_contact = True
+            if in_mb:
+                _finish_mb_section()
             section = header.group(1).strip()
             is_array_table = line.lstrip().startswith("[[")
             in_mb = section == "musicbrainz" and not is_array_table
@@ -463,14 +483,16 @@ def save_mb_contact(contact: str, config_path: Path | None = None) -> Path:
                 found_mb = True
             out_lines.append(line)
             continue
-        if in_mb and _CONTACT_KEY_RE.match(line):
+        if in_mb and not replaced_contact and _CONTACT_KEY_RE.match(line):
             out_lines.append(contact_line)
             replaced_contact = True
             continue
+        if in_mb and commented_idx is None and _COMMENTED_CONTACT_RE.match(line):
+            commented_idx = len(out_lines)
         out_lines.append(line)
 
-    if found_mb and not replaced_contact:
-        out_lines.append(contact_line)
+    if in_mb:
+        _finish_mb_section()
     elif not found_mb:
         if out_lines and out_lines[-1].strip():
             out_lines.append("")
@@ -491,13 +513,105 @@ def save_mb_contact(contact: str, config_path: Path | None = None) -> Path:
         )
 
     target.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(target, rendered)
+    return target
+
+
+def _atomic_write_text(target: Path, text: str) -> None:
+    """Write text atomically (owner-only temp file, then os.replace)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".afv-cfg-", suffix=".tmp", dir=str(target.parent))
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(rendered)
+            handle.write(text)
         os.replace(tmp_path, target)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def render_config_template(contact: str | None = None) -> str:
+    """Render a commented config.toml template; every setting shows its default value."""
+    defaults = AppConfig()
+    if contact is not None:
+        contact_line = f"contact = {json.dumps(validate_mb_contact(contact))}"
+    else:
+        contact_line = (
+            "# Required for online lookups; replace with your real relay address or URL.\n"
+            '# contact = "your-relay-address@your-relay-domain"'
+        )
+    flat = str(defaults.output.flat).lower()
+    copy_mp3 = str(defaults.audio.copy_mp3).lower()
+    return f"""# audio-from-video configuration (TOML).
+# Uncomment a line to override its default. Environment variables (AFV_FFMPEG_PATH,
+# AFV_FFPROBE_PATH, AFV_OUTPUT_DIR, AFV_MB_CONTACT, and AFV_MB_USER_AGENT) take precedence.
+
+[musicbrainz]
+# MusicBrainz requires a reachable contact in the User-Agent: an anonymous email relay
+# (Apple Hide My Email, SimpleLogin, or Duck Address) or a public repository URL.
+# It is stored only in this local file and sent only to MusicBrainz and the
+# Cover Art Archive.
+{contact_line}
+# Full User-Agent override, in the form "AppName/Version ( contact )".
+# user_agent = "MyApp/1.0 ( https://github.com/you/myapp )"
+
+[audio]
+# Re-encode target: a CBR bitrate (e.g., 320k, 256k, or 192k) or LAME VBR v0..v9.
+# quality = "{defaults.audio.quality}"
+# Stream-copy MP3 sources without re-encoding unless -q, --reencode, or --normalize is given.
+# copy_mp3 = {copy_mp3}
+# --normalize mode: "linear" preserves dynamics (may stay below the target);
+# "dynamic" always reaches the target by compressing.
+# loudnorm_mode = "{defaults.audio.loudnorm_mode}"
+# Integrated loudness target in LUFS (-70 to -5).
+# loudnorm_i = {defaults.audio.loudnorm_i}
+# True-peak ceiling in dBTP (-9 to 0).
+# loudnorm_tp = {defaults.audio.loudnorm_tp}
+# Loudness range target in LU (1 to 50).
+# loudnorm_lra = {defaults.audio.loudnorm_lra}
+
+[output]
+# Default output root (same as -o/--output-dir).
+# output_dir = "/path/to/Music/Extracted"
+# Write files directly into the output root instead of <Album Artist>/<Album>/.
+# flat = {flat}
+# Existing destination files: skip, overwrite, or rename.
+# on_conflict = "{defaults.output.on_conflict.value}"
+
+[execution]
+# Parallel FFmpeg workers (default: min(4, CPU count)).
+# jobs = 4
+
+[matching]
+# Minimum score to apply a match without asking.
+# auto_accept_score = {defaults.matching.auto_accept_score}
+# Minimum lead over the runner-up candidate.
+# min_margin = {defaults.matching.min_margin}
+# Below this score, a track counts as unmatched.
+# ambiguous_floor = {defaults.matching.ambiguous_floor}
+
+[binaries]
+# Explicit ffmpeg and ffprobe paths (otherwise found on PATH).
+# ffmpeg = "/opt/homebrew/bin/ffmpeg"
+# ffprobe = "/opt/homebrew/bin/ffprobe"
+"""
+
+
+def write_config_template(
+    config_path: Path | None = None,
+    *,
+    contact: str | None = None,
+    force: bool = False,
+) -> Path:
+    """Create a commented config.toml (refusing to overwrite unless force=True)."""
+    target = config_path if config_path is not None else default_config_path()
+    if target.exists() and not force:
+        raise FileExistsError(str(target))
+    rendered = render_config_template(contact)
+    try:
+        tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as exc:  # pragma: no cover - template is static.
+        raise ConfigError(f"Internal error: config template is invalid TOML: {exc}") from exc
+    _atomic_write_text(target, rendered)
     return target
