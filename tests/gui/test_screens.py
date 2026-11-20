@@ -3968,6 +3968,113 @@ def test_invalid_env_override_banners_do_not_blame_config_toml(
     assert settings_valid.status_banner.text == "Settings saved."
 
 
+def test_invalid_utf8_config_and_preferences_saved_banner_refresh(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Handle invalid UTF-8 config.toml bytes safely and refresh ``Preferences saved.`` banners."""
+    import audio_from_video.gui.screens.inputs as inputs_mod
+
+    # 1. Non-UTF-8 config.toml on disk never raises UnicodeDecodeError on Inputs or Settings.
+    bad_utf8 = tmp_path / "bad_utf8_config.toml"
+    bad_utf8.write_bytes(b"\xff\xfe[audio]\n")
+    assert (
+        inputs_mod._invalid_config_banner_text(
+            show_when_none=True,
+            env={"AFV_CONFIG_PATH": str(bad_utf8)},
+        )
+        == INVALID_CONFIG_BANNER_TEXT
+    )
+
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(bad_utf8))
+    ctrl = FakeController(state=ControllerState.PREFLIGHT, config=None)
+    inputs_screen = InputsScreen(ctrl)
+    settings_screen = SettingsScreen(ctrl)
+    qtbot.addWidget(inputs_screen)
+    qtbot.addWidget(settings_screen)
+
+    ctrl.set_state(ControllerState.SETUP)
+    ctrl.set_offline_default(True)
+    ctrl.set_state(ControllerState.INPUTS)
+    assert not inputs_screen.config_warning_banner.isHidden()
+    assert inputs_screen.config_warning_banner.text == INVALID_CONFIG_BANNER_TEXT
+    assert settings_screen.is_config_load_blocked is True
+    assert not settings_screen.save_button.isEnabled()
+    settings_screen.refresh_env_overrides()
+
+    # Overwriting a previously loaded valid file with invalid UTF-8 does not crash refresh.
+    corrupt_later = tmp_path / "corrupt_later.toml"
+    corrupt_later.write_text('[audio]\nquality = "192k"\n', encoding="utf-8")
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(corrupt_later))
+    late_ctrl = FakeController(state=ControllerState.SETUP, config=None)
+    late_settings = SettingsScreen(late_ctrl)
+    qtbot.addWidget(late_settings)
+    assert late_settings.is_config_load_blocked is False
+    corrupt_later.write_bytes(b"\xff\xfe[audio]\n")
+    late_settings.refresh_env_overrides()
+
+    # Concurrent invalid UTF-8 during the second load_config call still blames config.toml.
+    calls = 0
+
+    def _race_utf8(*, config_path=None, env=None):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return AppConfig(config_path=config_path or corrupt_later)
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(inputs_mod, "load_config", _race_utf8)
+        assert (
+            inputs_mod._invalid_config_banner_text(
+                show_when_none=True,
+                env={"AFV_CONFIG_PATH": str(corrupt_later)},
+            )
+            == INVALID_CONFIG_BANNER_TEXT
+        )
+
+    # 2. Stale "Preferences saved. <env warning>" banner clears and updates cleanly.
+    valid_cfg = tmp_path / "valid_refresh.toml"
+    valid_cfg.write_text('[musicbrainz]\ncontact = "relay@duck.com"\n', encoding="utf-8")
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(valid_cfg))
+    monkeypatch.setenv("AFV_MB_CONTACT", "bad-env-contact")
+
+    pref_ctrl = FakeController(state=ControllerState.SETUP, config=None)
+    pref_settings = SettingsScreen(pref_ctrl)
+    qtbot.addWidget(pref_settings)
+    pref_ctrl.settings_saved.emit(None)
+    saved_text = pref_settings.status_banner.text
+    assert saved_text.startswith("Preferences saved.")
+    assert "AFV_MB_CONTACT" in saved_text
+
+    # Re-running refresh_env_overrides with the same invalid var preserves the saved prefix.
+    pref_settings.refresh_env_overrides()
+    assert pref_settings.status_banner.text == saved_text
+
+    # Replacing with a different invalid env var refreshes the banner text.
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    monkeypatch.setenv("AFV_MB_USER_AGENT", "Mozilla/5.0 (bad)")
+    pref_settings.refresh_env_overrides()
+    assert "AFV_MB_USER_AGENT" in pref_settings.status_banner.text
+    assert "AFV_MB_CONTACT" not in pref_settings.status_banner.text
+
+    # Unsetting after a UI-only save clears the stale "Preferences saved. <warning>" banner.
+    pref_ctrl.settings_saved.emit(None)
+    assert pref_settings.status_banner.text.startswith("Preferences saved.")
+    monkeypatch.delenv("AFV_MB_USER_AGENT", raising=False)
+    pref_settings.refresh_env_overrides()
+    assert pref_settings.status_banner.isHidden()
+
+    # Reloading raw TOML after a UI-only save also clears the stale "Preferences saved." banner.
+    monkeypatch.setenv("AFV_MB_CONTACT", "bad-env-contact")
+    pref_ctrl.settings_saved.emit(None)
+    assert pref_settings.status_banner.text.startswith("Preferences saved.")
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    pref_settings.load_from_config(None, config_path=valid_cfg)
+    assert pref_settings.status_banner.isHidden()
+
+
 def test_planning_screen_open_log_preserves_notices_and_clears_on_success_and_reset(
     qtbot,
     monkeypatch: pytest.MonkeyPatch,

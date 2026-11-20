@@ -134,7 +134,7 @@ def _invalid_config_banner_text(
     if file_error is None and target_path is not None and has_config_file:
         try:
             load_config(config_path=target_path, env={})
-        except (ConfigError, OSError) as exc:
+        except (ConfigError, OSError, UnicodeDecodeError) as exc:
             file_error = str(exc)
 
     env_issues = _find_invalid_env_overrides(active_env)
@@ -142,8 +142,10 @@ def _invalid_config_banner_text(
     if file_error is None and not env_issues and target_path is not None:
         try:
             load_config(config_path=target_path, env=active_env)
-        except (ConfigError, OSError) as exc:
+        except ConfigError as exc:
             env_load_error = str(exc)
+        except (OSError, UnicodeDecodeError) as exc:
+            file_error = str(exc)
 
     if file_error is not None:
         if env_issues:

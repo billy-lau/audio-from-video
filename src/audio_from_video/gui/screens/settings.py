@@ -851,13 +851,15 @@ class SettingsScreen(QWidget):
             if _path_exists(self._config_path):
                 try:
                     load_config(config_path=self._config_path, env={})
-                except (ConfigError, OSError):
+                except (ConfigError, OSError, UnicodeDecodeError):
                     file_ok = False
             if file_ok:
                 try:
                     load_config(config_path=self._config_path, env=active_env)
                 except ConfigError as exc:
                     extra_error = str(exc)
+                except (OSError, UnicodeDecodeError):
+                    extra_error = None
         return issues, extra_error
 
     def _compose_env_override_warning(
@@ -924,6 +926,13 @@ class SettingsScreen(QWidget):
             return f"{file_warning} {env_warning}"
         return file_warning or env_warning
 
+    def _is_owned_warning_banner(self, previous_warning: str | None) -> bool:
+        """Return True when ``status_banner`` holds a warning banner managed here."""
+        if previous_warning is None:
+            return False
+        current = self.status_banner.text
+        return current in (previous_warning, f"Preferences saved. {previous_warning}")
+
     def _refresh_env_validation_state(
         self,
         active_env: Mapping[str, str],
@@ -959,20 +968,27 @@ class SettingsScreen(QWidget):
 
         previous_warning = self._raw_validation_warning
         refreshed = self._compose_configuration_warning(self._config_path.name)
-        banner_is_ours = self.status_banner.isHidden() or (
-            previous_warning is not None and self.status_banner.text == previous_warning
+        is_saved_prefix = (
+            previous_warning is not None
+            and self.status_banner.text == f"Preferences saved. {previous_warning}"
+        )
+        banner_is_ours = self.status_banner.isHidden() or self._is_owned_warning_banner(
+            previous_warning
         )
         self._raw_validation_warning = refreshed
         if refreshed is not None:
-            if banner_is_ours and (
-                self.status_banner.isHidden() or self.status_banner.text != refreshed
-            ):
+            should_update = self.status_banner.isHidden() or (
+                refreshed != previous_warning
+                if is_saved_prefix
+                else self.status_banner.text != refreshed
+            )
+            if banner_is_ours and should_update:
                 self.status_banner.set_message(
                     "status_warn",
                     refreshed,
                     role_label="Configuration warning",
                 )
-        elif previous_warning is not None and self.status_banner.text == previous_warning:
+        elif self._is_owned_warning_banner(previous_warning):
             self.status_banner.clear_message()
 
     def _populate_conflict_choices(self) -> None:
@@ -1050,7 +1066,7 @@ class SettingsScreen(QWidget):
         self._raw_validation_warning = None
         self._config_load_blocked = False
         self.save_button.setEnabled(True)
-        if prev_blocked or (prev_warning is not None and self.status_banner.text == prev_warning):
+        if prev_blocked or self._is_owned_warning_banner(prev_warning):
             self.status_banner.clear_message()
 
         try:
@@ -1343,7 +1359,7 @@ class SettingsScreen(QWidget):
         # Inspect load_config validation for the exact ConfigError text and any unexpected issues.
         try:
             load_config(config_path=target_path, env={})
-        except ConfigError as exc:
+        except (ConfigError, OSError, UnicodeDecodeError) as exc:
             self._raw_load_error_text = str(exc)
 
         self._refresh_env_validation_state(os.environ, probe_load_config=True)
