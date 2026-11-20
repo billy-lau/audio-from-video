@@ -26,6 +26,7 @@ afv ./videos/
 - [Installation](#installation)
 - [First-run setup: MusicBrainz contact](#first-run-setup-musicbrainz-contact)
 - [Usage](#usage)
+- [Desktop app](#desktop-app)
 - [How tracks are named and organized](#how-tracks-are-named-and-organized)
 - [Metadata matching and prompts](#metadata-matching-and-prompts)
 - [Loudness normalization](#loudness-normalization)
@@ -188,6 +189,86 @@ afv cache clear         # Empty the cache and reclaim disk space (--expired-only
 
 If an input file or folder is literally named `doctor`, `config`, `cache`, or `extract`, write
 `./doctor` or use `afv extract doctor`.
+
+## Desktop app
+
+`afv-gui` is an optional PySide6 desktop front end built on the exact same extraction, lookup,
+naming, and tagging engine as the CLI. The base CLI install never pulls Qt; install the optional
+`gui` extra to add `afv-gui`.
+
+### Installing and launching
+
+You still need Python 3.11 or newer and FFmpeg (with `ffprobe` and `libmp3lame`), just like the
+CLI. Installing with the `gui` extra downloads `PySide6-Essentials` (LGPL-3.0, roughly 116 MB
+compressed and ~350 MB installed on macOS) separately, keeping the base CLI install lightweight.
+
+```bash
+pipx install "/path/to/audio_from_video[gui]"
+# or with uv:
+uv tool install "/path/to/audio_from_video[gui]"
+# or inside an editable checkout virtual environment:
+pip install -e ".[gui]"
+```
+
+Launch the desktop window with:
+
+```bash
+afv-gui
+```
+
+### Supported systems
+
+- **macOS:** 14 (Sonoma) or newer.
+- **Windows:** 10 or newer.
+- **Linux:** Ubuntu 22.04 or newer (and comparable desktops). On headless or minimal Ubuntu/Debian
+  systems, install the Qt runtime libraries first:
+
+```bash
+sudo apt install libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+```
+
+### Workflow
+
+1. **Setup:** Checks `config.toml` and FFmpeg (`ffmpeg`, `ffprobe`, and `libmp3lame`). Enter a
+   reachable MusicBrainz contact (such as an anonymous email relay or a public repository URL),
+   browse for an explicit `ffmpeg` binary if needed, click **Retry check** to reload `config.toml`
+   and re-check binaries after fixing a configuration error, or choose **Use offline only** to start
+   future launches in offline mode.
+2. **Inputs:** Drag and drop video files or folders (or add them from the file picker), choose
+   whether to include subfolders, inspect or override the output folder, and set per-run options
+   (online or offline mode, confirm every match, keep native names, quality, re-encode MP3,
+   loudness normalization, cover art, flat layout, conflict policy, parallel jobs, preferred audio
+   language, audio stream index, stop at first failure, and optional pinned tags). Changes made
+   here apply only to the current run and are not written to `config.toml`.
+3. **Planning and prompts:** Shows live probing and lookup progress, cache hits, MusicBrainz
+   request counts, and outage notices. When a choice is needed, window-modal prompts open for
+   audio stream selection, uncertain matches (including manual search with a **Cancel run** button
+   while a search is busy, as well as custom tag entry), release edition selection (when **Confirm
+   every match** is checked), and non-Latin English aliases.
+4. **Review:** Always shown before extraction. Inspect the planned destination table, filter rows
+   (All, Needs attention, Skipped, and Failed), view full metadata (including warnings and
+   candidate lists) in the details pane, and toggle skipping individual tracks without re-planning.
+5. **Extraction and cancellation:** Tracks live queued, extracting, done, skipped, failed, and
+   cancelled statuses. Cancelling during planning returns to **Inputs**; cancelling during
+   extraction stops active FFmpeg processes, removes partial `.afv-*.part` files and newly created
+   empty folders, and moves to **Summary**.
+6. **Summary:** Shows counts per outcome plus **Cancelled** and **Not run** counts, lists failed
+   and unmatched tracks, opens the output or containing folder in your system file manager, saves
+   a JSON report (`Save report…`), and resets for a new batch.
+7. **Settings and logs:** Accessible from **Setup** and **Inputs** only (disabled while a batch is
+   active). Edit persistent `config.toml` defaults (only changed keys are written back to disk),
+   inspect read-only environment variable overrides, view or clear the SQLite cache, toggle startup
+   offline mode, set the log level, and open the log folder (`afv-gui.log`).
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+| :--- | :--- |
+| `Ctrl+O` / `Cmd+O` | Add video files from the Inputs screen. |
+| `Ctrl+,` / `Cmd+,` | Open **Settings** (when on the Setup or Inputs screen). |
+| `Enter` | Accept the default action in the active dialog or form (**Use fallback** on an uncertain or unmatched **Match** dialog, or **Use selected** when confirming an auto-accepted match). |
+| `Esc` | Dismiss a dialog. Inside the **Match** dialog, closes an open **Search again** or **Enter tags** form first; pressing `Esc` again defaults to the safe **Use fallback** choice. |
+| `1`–`9` | Pick the corresponding candidate row inside the **Match** dialog. |
 
 ## How tracks are named and organized
 
