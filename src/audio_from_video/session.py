@@ -225,6 +225,9 @@ class RunSession:
             mb_client, itunes_client, resolver, artwork_fetcher = services_factory(
                 user_agent, config, cache
             )
+            # Deliberate minor deviation from gui_plan.md §5.3: install token.sleep
+            # uniformly on all four HTTP fetchers for both GUI and CLI runs. CLI
+            # behavior is equivalent because the CLI's CancelToken is never cancelled.
             sleep_fn = token.sleep
             for fetcher in _iter_fetchers(mb_client, itunes_client):
                 set_sleep = getattr(fetcher, "set_sleep", None)

@@ -13,7 +13,6 @@ from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING
 
-from platformdirs import user_log_dir
 from PySide6.QtCore import (
     QByteArray,
     QCoreApplication,
@@ -43,7 +42,6 @@ from PySide6.QtWidgets import (
 from shiboken6 import isValid as qt_is_valid
 
 from audio_from_video.cancel import OperationCancelled
-from audio_from_video.config import APP_NAME
 from audio_from_video.gui.controller import (
     SETTINGS_APPLICATION,
     SETTINGS_ORGANIZATION,
@@ -65,6 +63,7 @@ from audio_from_video.gui.screens import (
 )
 from audio_from_video.gui.screens._common import (
     StatusLine,
+    log_directory,
     make_heading_label,
     open_local_path,
     set_accessible,
@@ -122,7 +121,7 @@ def open_qsettings(parent: QObject | None = None) -> QSettings:
 
 def default_log_dir() -> Path:
     """Return the user log directory for ``audio-from-video``."""
-    return Path(user_log_dir(APP_NAME))
+    return log_directory()
 
 
 def default_log_file() -> Path:
@@ -704,6 +703,21 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.dismiss_error_button)
         layout.addLayout(button_row)
 
+        self.error_log_feedback_label = QLabel(panel)
+        self.error_log_feedback_label.setObjectName("main_error_log_feedback_label")
+        self.error_log_feedback_label.setWordWrap(True)
+        self.error_log_feedback_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.error_log_feedback_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        set_accessible(
+            self.error_log_feedback_label,
+            "Log folder notice",
+            "Displays inline feedback when opening the log folder fails.",
+        )
+        self.error_log_feedback_label.setVisible(False)
+        layout.addWidget(self.error_log_feedback_label)
+
         panel.setVisible(False)
         return panel
 
@@ -901,16 +915,28 @@ class MainWindow(QMainWindow):
         """Sync the active package logger level from ``QSettings['log/level']``."""
         apply_log_level_from_settings(self._qt_log_handler)
 
+    def _clear_error_log_feedback(self) -> None:
+        """Clear and hide any inline notice from opening the log folder."""
+        self.error_log_feedback_label.clear()
+        set_accessible(
+            self.error_log_feedback_label,
+            "Log folder notice",
+            "Displays inline feedback when opening the log folder fails.",
+        )
+        self.error_log_feedback_label.setVisible(False)
+
     def show_error_panel(self, title: str, details: str) -> None:
         """Display the inline dismissible error panel with ``title`` and ``details``."""
         heading = title.strip() or "Unexpected error"
         self.error_header.set_status("status_error", heading)
         self.error_details.setPlainText(details.strip())
+        self._clear_error_log_feedback()
         self.error_panel.setVisible(True)
 
     @Slot()
     def clear_error_panel(self) -> None:
         """Clear and hide the inline application error panel."""
+        self._clear_error_log_feedback()
         self.error_details.clear()
         self.error_panel.setVisible(False)
 
@@ -1035,7 +1061,21 @@ class MainWindow(QMainWindow):
     @Slot()
     def _on_open_log_folder(self) -> None:
         folder = self._log_file.parent if self._log_file is not None else default_log_dir()
-        open_local_path(folder)
+        if open_local_path(folder):
+            self._clear_error_log_feedback()
+            return
+        try:
+            exists = folder.expanduser().exists()
+        except OSError:
+            exists = False
+        notice = (
+            f"Could not open log folder: {folder}."
+            if exists
+            else f"Log folder does not exist yet: {folder}."
+        )
+        self.error_log_feedback_label.setText(notice)
+        set_accessible(self.error_log_feedback_label, "Log folder notice", notice)
+        self.error_log_feedback_label.setVisible(True)
 
     # -- QWidget events -------------------------------------------------------
 

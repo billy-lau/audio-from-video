@@ -548,12 +548,7 @@ def execute_plan(
 
                         if item.action in (PlanAction.FAIL_NO_AUDIO, PlanAction.FAIL_ERROR):
                             _emit_queued(idx, item)
-                            try:
-                                res = _execute_single_item(item, item_index=idx, **item_kwargs)
-                            except (InterruptedError, OperationCancelled):
-                                interrupted_flag.set()
-                                _cancel_queued(remove=True, cancel_immediate=False)
-                                break
+                            res = _execute_single_item(item, item_index=idx, **item_kwargs)
                             ordered_results[idx] = res
                             completed_count += 1
                             _emit_finished(on_event, idx, res)

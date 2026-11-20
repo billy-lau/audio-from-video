@@ -62,6 +62,7 @@ from audio_from_video.gui.workers import (
 from audio_from_video.logging_setup import configure_logging
 from audio_from_video.models import (
     AudioStreamInfo,
+    ConflictPolicy,
     ManualOverrides,
     MediaInput,
     PlanAction,
@@ -5506,3 +5507,239 @@ def test_cache_auto_refresh_defers_while_preflight_worker_is_running(
         assert errors == []
     finally:
         pf_release.set()
+
+
+def test_invalid_env_contact_with_valid_config_preserves_file_defaults_and_blocks_online(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Keep valid config.toml defaults when AFV_MB_CONTACT is invalid; block online runs."""
+    custom_ff = tmp_path / "custom" / "ffmpeg"
+    custom_fp = tmp_path / "custom" / "ffprobe"
+    custom_out = tmp_path / "configured_out"
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        f'[musicbrainz]\ncontact = "{TEST_CONTACT}"\n'
+        f'user_agent = "afv-test/1.0 ( {TEST_CONTACT} )"\n'
+        f'[binaries]\nffmpeg = "{custom_ff.as_posix()}"\n'
+        f'ffprobe = "{custom_fp.as_posix()}"\n'
+        '[audio]\nquality = "192k"\ncopy_mp3 = false\nloudnorm_mode = "dynamic"\n'
+        f'[output]\noutput_dir = "{custom_out.as_posix()}"\n'
+        'flat = true\non_conflict = "rename"\n'
+        "[execution]\njobs = 2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFV_MB_CONTACT", "not-an-email")
+
+    inspect_calls: list[AppConfig | None] = []
+
+    def _inspect(
+        config: AppConfig | None = None, env: Any = None
+    ) -> tuple[BinaryResolution, BinaryResolution]:
+        _ = env
+        inspect_calls.append(config)
+        if (
+            config is not None
+            and config.binaries.ffmpeg_path == custom_ff.as_posix()
+            and config.binaries.ffprobe_path == custom_fp.as_posix()
+        ):
+            return (
+                BinaryResolution("ffmpeg", custom_ff, "config.toml"),
+                BinaryResolution("ffprobe", custom_fp, "config.toml"),
+            )
+        return _fake_binaries(tmp_path, ffmpeg_found=False, ffprobe_found=False)
+
+    monkeypatch.setattr(binaries_mod, "inspect_binaries", _inspect)
+    monkeypatch.setattr(binaries_mod, "has_libmp3lame", lambda _p: True)
+
+    ctrl = RunController(cache_dir=tmp_path / "cache")
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000):
+        ctrl.start_preflight()
+    assert ctrl.state == ControllerState.SETUP
+    assert ctrl.config is None
+    assert inspect_calls == []
+
+    # Switching to offline mode checks binaries using the valid config.toml settings.
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000) as sig:
+        ctrl.use_offline_only()
+    qtbot.waitUntil(lambda: ctrl._preflight_thread is None, timeout=5000)
+
+    assert sig.args == [ControllerState.INPUTS]
+    assert ctrl.state == ControllerState.INPUTS
+    assert ctrl.config is None
+    assert len(inspect_calls) == 1
+    checked_cfg = inspect_calls[0]
+    assert checked_cfg is not None
+    assert checked_cfg.binaries.ffmpeg_path == custom_ff.as_posix()
+    assert checked_cfg.binaries.ffprobe_path == custom_fp.as_posix()
+    assert checked_cfg.audio.quality == "192k"
+    assert checked_cfg.audio.copy_mp3 is False
+    assert checked_cfg.audio.loudnorm_mode == "dynamic"
+    assert checked_cfg.output.output_dir == custom_out.as_posix()
+    assert checked_cfg.output.flat is True
+    assert checked_cfg.output.on_conflict == ConflictPolicy.RENAME
+    assert checked_cfg.execution.jobs == 2
+    assert checked_cfg.musicbrainz.contact is None
+    assert checked_cfg.musicbrainz.user_agent_override is None
+
+    # An offline plan inherits the valid config.toml defaults without starting online services.
+    captured_sessions: list[_CountingFakeSession] = []
+
+    def _open_session(
+        _cls: Any, options: RunOptions, config: AppConfig, binaries: ResolvedBinaries, **kw: Any
+    ) -> _CountingFakeSession:
+        sess = _CountingFakeSession(
+            options=options,
+            config=config,
+            binaries=binaries,
+            token=kw["token"],
+            user_agent=kw["user_agent"],
+            cache_dir=kw["cache_dir"],
+        )
+        captured_sessions.append(sess)
+        return sess
+
+    monkeypatch.setattr(session_mod.RunSession, "open", classmethod(_open_session))
+    clip = _make_video(tmp_path / "media")
+    ctrl.start_plan(RunOptions(inputs=(clip,), offline=True))
+    qtbot.waitUntil(lambda: ctrl.state == ControllerState.REVIEW, timeout=5000)
+    assert len(captured_sessions) == 1
+    session_cfg = captured_sessions[0].config
+    assert session_cfg.audio.quality == "192k"
+    assert session_cfg.audio.copy_mp3 is False
+    assert session_cfg.audio.loudnorm_mode == "dynamic"
+    assert session_cfg.output.output_dir == custom_out.as_posix()
+    assert session_cfg.output.flat is True
+    assert session_cfg.output.on_conflict == ConflictPolicy.RENAME
+    assert session_cfg.execution.jobs == 2
+    assert session_cfg.binaries.ffmpeg_path == custom_ff.as_posix()
+    assert session_cfg.binaries.ffprobe_path == custom_fp.as_posix()
+    assert session_cfg.musicbrainz.contact is None
+    assert session_cfg.musicbrainz.user_agent_override is None
+    ctrl.back()
+    assert ctrl.state == ControllerState.INPUTS
+
+    # An online plan MUST stay blocked despite config.toml containing valid credentials.
+    input_errs: list[tuple[str, str]] = []
+    setup_errs: list[str] = []
+    ctrl.input_error.connect(lambda k, m: input_errs.append((k, m)))
+    ctrl.setup_error.connect(setup_errs.append)
+
+    ctrl.start_plan(RunOptions(inputs=(clip,), offline=False))
+    assert ctrl.state == ControllerState.SETUP
+    assert ctrl._plan_thread is None
+    assert len(captured_sessions) == 1
+    assert len(input_errs) == 1
+    assert input_errs[0][0] == "missing_contact"
+    assert "not-an-email" in input_errs[0][1]
+    assert setup_errs == [input_errs[0][1]]
+
+
+def test_invalid_env_user_agent_and_mixed_env_override_block_online_plan(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Block online plans for bad AFV_MB_USER_AGENT or mixed valid UA / bad contact."""
+    custom_ff = tmp_path / "cfg_bin" / "ffmpeg"
+    env_ff = tmp_path / "env_bin" / "ffmpeg"
+    env_fp = tmp_path / "env_bin" / "ffprobe"
+    custom_out = tmp_path / "cfg_out"
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        f'[musicbrainz]\ncontact = "{TEST_CONTACT}"\n'
+        f'[binaries]\nffmpeg = "{custom_ff.as_posix()}"\n'
+        '[audio]\nquality = "192k"\n'
+        f'[output]\noutput_dir = "{custom_out.as_posix()}"\n',
+        encoding="utf-8",
+    )
+
+    # Case 1: invalid AFV_MB_USER_AGENT with valid AFV_FFMPEG_PATH / AFV_FFPROBE_PATH overlays.
+    monkeypatch.setenv("AFV_MB_USER_AGENT", "Mozilla/5.0")
+    monkeypatch.setenv("AFV_FFMPEG_PATH", env_ff.as_posix())
+    monkeypatch.setenv("AFV_FFPROBE_PATH", env_fp.as_posix())
+    fallback = controller_mod._fallback_config_with_raw_binaries(cfg_path)
+    assert fallback.audio.quality == "192k"
+    assert fallback.output.output_dir == custom_out.as_posix()
+    assert fallback.binaries.ffmpeg_path == env_ff.as_posix()
+    assert fallback.binaries.ffprobe_path == env_fp.as_posix()
+    assert fallback.musicbrainz.contact is None
+    assert fallback.musicbrainz.user_agent_override is None
+
+    # Also verify invalid AFV_MB_USER_AGENT triggers preflight failure and blocks online plan.
+    _install_preflight_binaries(monkeypatch, tmp_path)
+    ctrl_bad_ua = RunController(cache_dir=tmp_path / "cache_ua")
+    with qtbot.waitSignal(ctrl_bad_ua.state_changed, timeout=5000):
+        ctrl_bad_ua.start_preflight()
+    assert ctrl_bad_ua.state == ControllerState.SETUP
+    assert ctrl_bad_ua.config is None
+
+    with qtbot.waitSignal(ctrl_bad_ua.state_changed, timeout=5000):
+        ctrl_bad_ua.use_offline_only()
+    qtbot.waitUntil(lambda: ctrl_bad_ua._preflight_thread is None, timeout=5000)
+    assert ctrl_bad_ua.state == ControllerState.INPUTS
+
+    ua_errs: list[tuple[str, str]] = []
+    ctrl_bad_ua.input_error.connect(lambda k, m: ua_errs.append((k, m)))
+    clip = _make_video(tmp_path / "media")
+    ctrl_bad_ua.start_plan(RunOptions(inputs=(clip,), offline=False))
+    assert ctrl_bad_ua.state == ControllerState.SETUP
+    assert ctrl_bad_ua._plan_thread is None
+    assert len(ua_errs) == 1
+    assert ua_errs[0][0] == "missing_contact"
+
+    # Case 2: valid AFV_MB_USER_AGENT paired with invalid AFV_MB_CONTACT still blocks online.
+    monkeypatch.setenv("AFV_MB_USER_AGENT", f"afv-test/1.0 ( {TEST_CONTACT} )")
+    monkeypatch.setenv("AFV_MB_CONTACT", "not-an-email")
+
+    ctrl = RunController(cache_dir=tmp_path / "cache")
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000):
+        ctrl.start_preflight()
+    assert ctrl.state == ControllerState.SETUP
+    assert ctrl.config is None
+
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000):
+        ctrl.use_offline_only()
+    qtbot.waitUntil(lambda: ctrl._preflight_thread is None, timeout=5000)
+    assert ctrl.state == ControllerState.INPUTS
+
+    input_errs: list[tuple[str, str]] = []
+    ctrl.input_error.connect(lambda k, m: input_errs.append((k, m)))
+    ctrl.start_plan(RunOptions(inputs=(clip,), offline=False))
+    assert ctrl.state == ControllerState.SETUP
+    assert ctrl._plan_thread is None
+    assert len(input_errs) == 1
+    assert input_errs[0][0] == "missing_contact"
+    assert "not-an-email" in input_errs[0][1]
+
+
+def test_invalid_config_with_valid_env_contact_blocks_online_plan(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Block online start_plan for an invalid config.toml even when AFV_MB_CONTACT is valid."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('[audio]\nquality = "321k"\n', encoding="utf-8")
+    monkeypatch.setenv("AFV_MB_CONTACT", TEST_CONTACT)
+    _install_preflight_binaries(monkeypatch, tmp_path)
+
+    ctrl = RunController(cache_dir=tmp_path / "cache")
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000):
+        ctrl.start_preflight()
+    assert ctrl.state == ControllerState.SETUP
+    assert ctrl.config is None
+
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000):
+        ctrl.use_offline_only()
+    qtbot.waitUntil(lambda: ctrl._preflight_thread is None, timeout=5000)
+    assert ctrl.state == ControllerState.INPUTS
+
+    input_errs: list[tuple[str, str]] = []
+    setup_errs: list[str] = []
+    ctrl.input_error.connect(lambda k, m: input_errs.append((k, m)))
+    ctrl.setup_error.connect(setup_errs.append)
+
+    clip = _make_video(tmp_path / "media")
+    ctrl.start_plan(RunOptions(inputs=(clip,), offline=False))
+    assert ctrl.state == ControllerState.SETUP
+    assert ctrl._plan_thread is None
+    assert len(input_errs) == 1
+    assert input_errs[0][0] == "missing_contact"
+    assert "321k" in input_errs[0][1]
+    assert setup_errs == [input_errs[0][1]]
