@@ -2,7 +2,8 @@
 
 Phase 3's planner calls TrackResolver; this module never prompts or touches files.
 Provider and data problems never escape resolve(), resolve_batch(), or enrich(); they
-become warnings on an UNMATCHED or AMBIGUOUS result instead.
+become warnings on an UNMATCHED or AMBIGUOUS result instead. Cooperative cancellation
+(OperationCancelled) is a BaseException and propagates without recording a failure.
 """
 
 from __future__ import annotations
@@ -274,6 +275,16 @@ class TrackResolver:
         self._breaker_lock = threading.Lock()
         self._consecutive_failures: dict[str, int] = {}
         self._tripped_providers: set[str] = set()
+        self._cancel_ctx = threading.local()
+
+    def _active_cancel(self) -> CancelToken | None:
+        ctx = getattr(self, "_cancel_ctx", None)
+        return getattr(ctx, "token", None) if ctx is not None else None
+
+    def _raise_if_cancelled(self) -> None:
+        token = self._active_cancel()
+        if token is not None:
+            token.raise_if_cancelled()
 
     def _is_provider_tripped(self, provider: str) -> bool:
         if self._breaker_threshold <= 0:
@@ -438,6 +449,7 @@ class TrackResolver:
         *,
         mb_mode: str = "smart",
     ) -> list[Candidate]:
+        self._raise_if_cancelled()
         if self._is_provider_tripped(provider):
             gathered.skipped_providers.add(provider)
             logger.debug("Skipping %s search; circuit breaker is open.", _provider_label(provider))
@@ -467,6 +479,7 @@ class TrackResolver:
                 elif use_raw_title:
                     cands = self.mb.search_candidates(query.raw_title, query.artist)
                     if not cands:
+                        self._raise_if_cancelled()
                         cands = self.mb.search_candidates(
                             query.title, query.artist, official_only=True
                         )
@@ -484,16 +497,20 @@ class TrackResolver:
                     if query.album_hint_from_folder and not any(
                         _albums_match(query.album_hint, c.album) for c in cands
                     ):
+                        self._raise_if_cancelled()
                         cands = self._unfiltered_mb_search(query, flags)
                 else:
                     cands = self._unfiltered_mb_search(query, flags)
                 self._record_provider_success(provider)
+                self._raise_if_cancelled()
                 return cands
             if self.itunes is not None:
                 cands = self.itunes.search_candidates(search_title, query.artist)
                 self._record_provider_success(provider)
+                self._raise_if_cancelled()
                 return cands
         except Exception as exc:
+            self._raise_if_cancelled()
             label = _provider_label(provider)
             gathered.warnings.append(f"{label} search failed: {_brief_error(exc)}")
             self._record_provider_failure(provider, exc, gathered.warnings)
@@ -723,6 +740,7 @@ class TrackResolver:
                 for cand in ordered:
                     to_enrich.append(choose_edition(cand, disc_hint=attempt.query.disc_hint))
             for edition in to_enrich:
+                self._raise_if_cancelled()
                 key = edition.release_id or ""
                 if not key or key in seen or done >= RECORD_ALL_MAX_ENRICH_PER_ATTEMPT:
                     continue
@@ -872,7 +890,7 @@ class TrackResolver:
         preferred_release_group_ids: frozenset[str] = frozenset(),
         overrides: ManualOverrides | None = None,
     ) -> MatchResult:
-        """Resolve one track; hintless input makes zero requests; never raises."""
+        """Resolve one track; hintless input makes zero requests; propagates OperationCancelled."""
         ov = overrides or NO_OVERRIDES
         try:
             gathered = self.gather(hints, duration_seconds, ov)
@@ -911,8 +929,13 @@ class TrackResolver:
 
         Processes ungrouped tracks singly and each multi-track folder one group at a time
         so candidate lists are released immediately instead of accumulating across the batch.
+        Checks ``cancel`` before each item, group member, and provider request, raising
+        ``OperationCancelled`` promptly without tripping provider circuit breakers. Calls
+        ``on_item_started(idx)`` once per item with its 0-based index into ``items`` as
+        resolution begins.
         """
-        _ = cancel, on_item_started
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         if not items:
             return []
         total = len(items)
@@ -926,6 +949,14 @@ class TrackResolver:
         def _notify(done: int, label: str) -> None:
             if on_progress is not None:
                 on_progress(done, total, label)
+
+        def _check_cancel() -> None:
+            if cancel is not None:
+                cancel.raise_if_cancelled()
+
+        def _mark_started(index: int) -> None:
+            if on_item_started is not None:
+                on_item_started(index)
 
         groups: dict[Hashable, list[int]] = {}
         for idx, item in enumerate(items):
@@ -943,52 +974,71 @@ class TrackResolver:
             i: key for key, idxs in groups.items() if len(idxs) >= 2 for i in idxs
         }
 
-        for idx, item in enumerate(items):
-            if results[idx] is not None:
-                continue
-            group_key = index_to_group.get(idx)
-            if group_key is None:
-                label = _label(item)
-                _notify(completed, label)
-                g = self._gather_safe(item)
-                res = self.decide(g)
-                results[idx] = self._finalize(res, g.overrides, disc_hint=g.hints.disc_number)
-                completed += 1
-                _notify(completed, label)
-                continue
-            if group_key in handled_groups:
-                continue
-            handled_groups.add(group_key)
-            indices = groups[group_key]
-            group_gathered: list[_Gathered] = []
-            for i in indices:
-                _notify(completed, _label(items[i]))
-                group_gathered.append(self._gather_safe(items[i]))
-            group_first = [self.decide(g) for g in group_gathered]
-            counts = Counter(
-                r.best.release_group_id
-                for r in group_first
-                if r.decision == MatchDecision.AUTO_ACCEPT
-                and r.best is not None
-                and r.best.release_group_id
-            )
-            dominant: frozenset[str] = frozenset()
-            if counts:
-                top_rg, top_count = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
-                # Require at least 2 tracks AND at least 50% of the folder to agree so a
-                # mixed playlist folder is never hijacked by a minority of tracks.
-                if top_count >= 2 and top_count * 2 >= len(indices):
-                    dominant = frozenset({top_rg})
-            for pos, i in enumerate(indices):
-                g = group_gathered[pos]
-                res = group_first[pos]
-                if dominant:
-                    flags = {f.lower() for f in items[i].hints.edition_flags}
-                    if not (flags & {"live", "remix"}):
-                        res = self.decide(g, dominant)
-                results[i] = self._finalize(res, g.overrides, disc_hint=g.hints.disc_number)
-                completed += 1
-                _notify(completed, _label(items[i]))
+        prev_token = self._active_cancel()
+        if not hasattr(self, "_cancel_ctx"):
+            self._cancel_ctx = threading.local()
+        self._cancel_ctx.token = cancel
+        try:
+            for idx, item in enumerate(items):
+                if results[idx] is not None:
+                    continue
+                group_key = index_to_group.get(idx)
+                if group_key is None:
+                    _check_cancel()
+                    label = _label(item)
+                    _mark_started(idx)
+                    _notify(completed, label)
+                    _check_cancel()
+                    g = self._gather_safe(item)
+                    _check_cancel()
+                    res = self.decide(g)
+                    results[idx] = self._finalize(res, g.overrides, disc_hint=g.hints.disc_number)
+                    _check_cancel()
+                    completed += 1
+                    _notify(completed, label)
+                    continue
+                if group_key in handled_groups:
+                    continue
+                handled_groups.add(group_key)
+                indices = groups[group_key]
+                group_gathered: list[_Gathered] = []
+                for i in indices:
+                    _check_cancel()
+                    _mark_started(i)
+                    _notify(completed, _label(items[i]))
+                    _check_cancel()
+                    group_gathered.append(self._gather_safe(items[i]))
+                _check_cancel()
+                group_first = [self.decide(g) for g in group_gathered]
+                counts = Counter(
+                    r.best.release_group_id
+                    for r in group_first
+                    if r.decision == MatchDecision.AUTO_ACCEPT
+                    and r.best is not None
+                    and r.best.release_group_id
+                )
+                dominant: frozenset[str] = frozenset()
+                if counts:
+                    top_rg, top_count = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+                    # Require at least 2 tracks AND at least 50% of the folder to agree so a
+                    # mixed playlist folder is never hijacked by a minority of tracks.
+                    if top_count >= 2 and top_count * 2 >= len(indices):
+                        dominant = frozenset({top_rg})
+                for pos, i in enumerate(indices):
+                    _check_cancel()
+                    g = group_gathered[pos]
+                    res = group_first[pos]
+                    if dominant:
+                        flags = {f.lower() for f in items[i].hints.edition_flags}
+                        if not (flags & {"live", "remix"}):
+                            res = self.decide(g, dominant)
+                    results[i] = self._finalize(res, g.overrides, disc_hint=g.hints.disc_number)
+                    _check_cancel()
+                    completed += 1
+                    _notify(completed, _label(items[i]))
+            _check_cancel()
+        finally:
+            self._cancel_ctx.token = prev_token
         return [r for r in results if r is not None]
 
     def manual_search(
@@ -1117,7 +1167,7 @@ class TrackResolver:
         warnings: list[str] | None = None,
         disc_hint: int | None = None,
     ) -> TrackMetadata:
-        """Build full TrackMetadata for a candidate; never raises."""
+        """Build full TrackMetadata for a candidate; propagates OperationCancelled."""
         meta, _chosen = self._enrich_with_candidate(
             candidate, warnings=warnings, disc_hint=disc_hint
         )
@@ -1131,6 +1181,7 @@ class TrackResolver:
         *args: Any,
         provider: str | None = None,
     ) -> Any:
+        self._raise_if_cancelled()
         if provider and self._is_provider_tripped(provider):
             logger.debug(
                 "Skipping %s; %s circuit breaker is open.", label, _provider_label(provider)
@@ -1139,6 +1190,7 @@ class TrackResolver:
         try:
             result = func(*args)
         except Exception as exc:
+            self._raise_if_cancelled()
             warn.append(f"{label} failed: {_brief_error(exc)}")
             if provider:
                 self._record_provider_failure(provider, exc, warn)
@@ -1146,6 +1198,7 @@ class TrackResolver:
             return None
         if provider:
             self._record_provider_success(provider)
+        self._raise_if_cancelled()
         return result
 
     def _recheck_edition(
