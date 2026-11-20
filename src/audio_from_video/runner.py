@@ -9,13 +9,20 @@ import signal
 import threading
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    CancelledError,
+    Future,
+    ThreadPoolExecutor,
+    as_completed,
+    wait,
+)
 from pathlib import Path
 from types import FrameType
 
 from audio_from_video.artwork import ArtworkFetcher
-from audio_from_video.cancel import CancelToken
-from audio_from_video.events import EventSink
+from audio_from_video.cancel import CancelToken, OperationCancelled
+from audio_from_video.events import NOT_RUN_MESSAGE, EventSink, TrackEvent, TrackStage
 from audio_from_video.extractor import (
     ExtractionError,
     ProcessRegistry,
@@ -153,6 +160,45 @@ def _next_available_rename_path(
         index += 1
 
 
+_IMMEDIATE_ACTIONS: frozenset[PlanAction] = frozenset(
+    {
+        PlanAction.SKIP_EXISTING,
+        PlanAction.SKIP_USER,
+        PlanAction.SKIP_NO_AUDIO,
+        PlanAction.FAIL_NO_AUDIO,
+        PlanAction.FAIL_ERROR,
+    }
+)
+
+
+def _is_stopped(registry: ProcessRegistry, cancel: CancelToken | None) -> bool:
+    """Return True if execution was stopped via the registry or cancel token."""
+    return registry.is_interrupted or (cancel is not None and cancel.is_cancelled)
+
+
+def _emit_event(on_event: EventSink | None, event: TrackEvent) -> None:
+    """Forward a Stage 2 ``TrackEvent`` when an event sink is provided."""
+    if on_event is not None:
+        on_event(event)
+
+
+def _emit_finished(on_event: EventSink | None, index: int, result: TrackResult) -> None:
+    """Emit the terminal ``FINISHED`` event matching a completed ``TrackResult``."""
+    if on_event is None:
+        return
+    on_event(
+        TrackEvent(
+            index=index,
+            source=result.item.media_input.path,
+            stage=TrackStage.FINISHED,
+            action=result.item.action,
+            outcome=result.outcome,
+            warnings=tuple(result.warnings),
+            message=result.error,
+        )
+    )
+
+
 def _execute_single_item(
     item: PlanItem,
     *,
@@ -166,11 +212,29 @@ def _execute_single_item(
     artwork_fetcher: ArtworkFetcher | None = None,
     max_rel_utf16: int | None = None,
     directories: _OutputDirectories | None = None,
+    cancel: CancelToken | None = None,
+    on_event: EventSink | None = None,
+    item_index: int | None = None,
 ) -> TrackResult:
     """Run extraction, artwork fetch, fresh ID3v2.3 tagging, verification, and atomic rename."""
     started = time.monotonic()
 
+    def _emit_extracting() -> None:
+        if item_index is not None:
+            _emit_event(
+                on_event,
+                TrackEvent(
+                    index=item_index,
+                    source=item.media_input.path,
+                    stage=TrackStage.EXTRACTING,
+                    action=item.action,
+                ),
+            )
+
+    # Preserve 720a067 ordering: skip and pre-failed items return their instant TrackResult
+    # even when a cancel or interrupt has fired after the item was already queued.
     if item.action in (PlanAction.SKIP_EXISTING, PlanAction.SKIP_USER):
+        _emit_extracting()
         return TrackResult(
             item=item,
             outcome=RunOutcome.SKIPPED,
@@ -180,6 +244,7 @@ def _execute_single_item(
         )
 
     if item.action == PlanAction.SKIP_NO_AUDIO:
+        _emit_extracting()
         return TrackResult(
             item=item,
             outcome=RunOutcome.SKIPPED_NO_AUDIO,
@@ -188,6 +253,7 @@ def _execute_single_item(
         )
 
     if item.action in (PlanAction.FAIL_NO_AUDIO, PlanAction.FAIL_ERROR):
+        _emit_extracting()
         return TrackResult(
             item=item,
             outcome=RunOutcome.FAILED,
@@ -208,8 +274,10 @@ def _execute_single_item(
     )
 
     # A cancel must not leave empty Artist/Album folders for items that never started.
-    if registry.is_interrupted:
+    if _is_stopped(registry, cancel):
         raise InterruptedError("Interrupted before creating the output folder.")
+
+    _emit_extracting()
     folders = directories if directories is not None else _OutputDirectories(output_root)
     try:
         folders.acquire(dest_dir)
@@ -237,6 +305,9 @@ def _execute_single_item(
                 warnings_out=warnings,
             )
 
+            if _is_stopped(registry, cancel):
+                raise InterruptedError("Interrupted after audio extraction.")
+
             art_payload: bytes | None = None
             art_source: str | None = None
             if not no_artwork:
@@ -244,7 +315,7 @@ def _execute_single_item(
                     art_payload = item.artwork_bytes
                     art_source = "embedded"
                 elif artwork_fetcher is not None and item.candidate is not None:
-                    if registry.is_interrupted:
+                    if _is_stopped(registry, cancel):
                         raise InterruptedError("Interrupted before artwork fetch.")
                     art_outcome = artwork_fetcher.fetch_for_candidate(item.candidate)
                     if art_outcome.data:
@@ -253,6 +324,9 @@ def _execute_single_item(
                     if art_outcome.warning:
                         warnings.append(art_outcome.warning)
 
+            if _is_stopped(registry, cancel):
+                raise InterruptedError("Interrupted before tagging.")
+
             wrote_id3, tag_warnings = write_tags(
                 part_path, item.metadata, artwork_bytes=art_payload
             )
@@ -260,12 +334,14 @@ def _execute_single_item(
 
             verify_tagged_mp3(part_path, expect_id3=wrote_id3)
 
-            if registry.is_interrupted:
+            if _is_stopped(registry, cancel):
                 raise InterruptedError("Interrupted before atomic rename.")
 
             # Defensive NFC case-insensitive TOCTOU check immediately before atomic os.replace().
             final_path = dest_path
             with replace_lock:
+                if _is_stopped(registry, cancel):
+                    raise InterruptedError("Interrupted before atomic rename.")
                 existing_conflict = _find_existing_conflict(output_root, final_path)
                 if existing_conflict is not None:
                     if on_conflict == ConflictPolicy.SKIP:
@@ -314,7 +390,7 @@ def _execute_single_item(
                 artwork_source=art_source,
                 normalization=norm_result,
             )
-        except InterruptedError:
+        except (InterruptedError, OperationCancelled):
             _unlink_quiet(part_path)
             registry.untrack_part(part_path)
             raise
@@ -353,20 +429,48 @@ def execute_plan(
     on_event: EventSink | None = None,
 ) -> RunSummary:
     """Execute Stage 2 extraction, artwork fetch, and tagging in parallel with SIGINT cleanup."""
-    _ = install_signal_handlers, cancel, on_event
     active_registry = registry if registry is not None else ProcessRegistry()
     summary = RunSummary(output_root=output_root)
     total = len(plan_items)
     if total == 0:
+        summary.interrupted = _is_stopped(active_registry, cancel)
         return summary
 
     rel_budget, _ = compute_relative_path_budget(output_root)
 
-    # Install signal handlers only when invoked on the main thread.
-    install_signals = threading.current_thread() is threading.main_thread()
+    # Install signal handlers only on the main thread, and never when explicitly disabled.
+    is_main_thread = threading.current_thread() is threading.main_thread()
+    install_signals = install_signal_handlers is not False and is_main_thread
     prev_sigint = None
     prev_sigterm = None
     interrupted_flag = threading.Event()
+    run_finished = threading.Event()
+    terminate_lock = threading.Lock()
+    terminate_thread: threading.Thread | None = None
+
+    def _is_interrupted() -> bool:
+        return interrupted_flag.is_set() or _is_stopped(active_registry, cancel)
+
+    def _start_terminate_async() -> None:
+        nonlocal terminate_thread
+        with terminate_lock:
+            if terminate_thread is not None or run_finished.is_set():
+                return
+            interrupted_flag.set()
+
+            def _run_terminate() -> None:
+                try:
+                    active_registry.terminate_all(timeout=2.0)
+                except Exception:
+                    logger.exception("Failed to terminate active processes on cancel.")
+
+            thread = threading.Thread(
+                target=_run_terminate,
+                name="afv-runner-terminate",
+                daemon=True,
+            )
+            thread.start()
+            terminate_thread = thread
 
     def _handle_signal(signum: int, _frame: FrameType | None) -> None:
         logger.warning("Received signal %s; terminating active ffmpeg processes...", signum)
@@ -383,6 +487,7 @@ def execute_plan(
     replace_lock = threading.Lock()
     ordered_results: list[TrackResult | None] = [None] * total
     completed_count = 0
+    failed_seen = False
 
     item_kwargs = {
         "ffmpeg_path": ffmpeg_path,
@@ -395,27 +500,45 @@ def execute_plan(
         "artwork_fetcher": artwork_fetcher,
         "max_rel_utf16": rel_budget,
         "directories": _OutputDirectories(output_root),
+        "cancel": cancel,
+        "on_event": on_event,
     }
 
+    def _emit_queued(index: int, item: PlanItem) -> None:
+        _emit_event(
+            on_event,
+            TrackEvent(
+                index=index,
+                source=item.media_input.path,
+                stage=TrackStage.QUEUED,
+                action=item.action,
+            ),
+        )
+
     try:
+        if cancel is not None:
+            cancel.add_callback(_start_terminate_async)
+
         max_workers = max(1, jobs)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             pending: dict[Future[TrackResult], int] = {}
 
+            def _cancel_queued(*, remove: bool, cancel_immediate: bool = True) -> None:
+                # On interruption, leave already-queued skip and pre-failed futures alone so they
+                # produce their instant TrackResult and FINISHED event as in 720a067.
+                for queued_fut, queued_idx in list(pending.items()):
+                    if not cancel_immediate and plan_items[queued_idx].action in _IMMEDIATE_ACTIONS:
+                        continue
+                    if not queued_fut.done() and queued_fut.cancel() and remove:
+                        pending.pop(queued_fut, None)
+
             if fail_fast:
                 next_idx = 0
-                failed_seen = False
 
-                while (
-                    next_idx < total
-                    and not failed_seen
-                    and not interrupted_flag.is_set()
-                    and not active_registry.is_interrupted
-                ) or pending:
+                while (next_idx < total and not failed_seen and not _is_interrupted()) or pending:
                     while (
                         not failed_seen
-                        and not interrupted_flag.is_set()
-                        and not active_registry.is_interrupted
+                        and not _is_interrupted()
                         and next_idx < total
                         and len(pending) < max_workers
                     ):
@@ -424,16 +547,31 @@ def execute_plan(
                         next_idx += 1
 
                         if item.action in (PlanAction.FAIL_NO_AUDIO, PlanAction.FAIL_ERROR):
-                            res = _execute_single_item(item, **item_kwargs)
+                            _emit_queued(idx, item)
+                            try:
+                                res = _execute_single_item(item, item_index=idx, **item_kwargs)
+                            except (InterruptedError, OperationCancelled):
+                                interrupted_flag.set()
+                                _cancel_queued(remove=True, cancel_immediate=False)
+                                break
                             ordered_results[idx] = res
                             completed_count += 1
+                            _emit_finished(on_event, idx, res)
                             if on_result is not None:
                                 on_result(res, completed_count, total)
                             failed_seen = True
+                            _cancel_queued(remove=True)
                             break
 
-                        fut = executor.submit(_execute_single_item, item, **item_kwargs)
+                        _emit_queued(idx, item)
+                        fut = executor.submit(
+                            _execute_single_item, item, item_index=idx, **item_kwargs
+                        )
                         pending[fut] = idx
+
+                    if _is_interrupted():
+                        interrupted_flag.set()
+                        _cancel_queued(remove=True, cancel_immediate=False)
 
                     if not pending:
                         break
@@ -443,40 +581,60 @@ def execute_plan(
                         idx = pending.pop(fut)
                         try:
                             res = fut.result()
-                        except InterruptedError:
+                        except (InterruptedError, OperationCancelled, CancelledError):
                             interrupted_flag.set()
+                            _cancel_queued(remove=True, cancel_immediate=False)
                             continue
                         ordered_results[idx] = res
                         completed_count += 1
+                        _emit_finished(on_event, idx, res)
                         if on_result is not None:
                             on_result(res, completed_count, total)
                         if res.outcome == RunOutcome.FAILED:
                             failed_seen = True
-                            for queued_fut in list(pending.keys()):
-                                if queued_fut.cancel():
-                                    pending.pop(queued_fut, None)
+                            _cancel_queued(remove=True)
+                        if _is_interrupted():
+                            interrupted_flag.set()
+                            _cancel_queued(remove=True, cancel_immediate=False)
             else:
                 for idx, item in enumerate(plan_items):
-                    if interrupted_flag.is_set() or active_registry.is_interrupted:
+                    if _is_interrupted():
                         break
-                    fut = executor.submit(_execute_single_item, item, **item_kwargs)
+                    _emit_queued(idx, item)
+                    fut = executor.submit(_execute_single_item, item, item_index=idx, **item_kwargs)
                     pending[fut] = idx
+
+                if _is_interrupted():
+                    interrupted_flag.set()
+                    _cancel_queued(remove=False, cancel_immediate=False)
 
                 for fut in as_completed(pending):
                     idx = pending[fut]
                     try:
                         res = fut.result()
-                    except InterruptedError:
+                    except (InterruptedError, OperationCancelled, CancelledError):
                         interrupted_flag.set()
+                        _cancel_queued(remove=False, cancel_immediate=False)
                         continue
                     ordered_results[idx] = res
                     completed_count += 1
+                    _emit_finished(on_event, idx, res)
                     if on_result is not None:
                         on_result(res, completed_count, total)
+                    if _is_interrupted():
+                        interrupted_flag.set()
+                        _cancel_queued(remove=False, cancel_immediate=False)
     except KeyboardInterrupt:
         interrupted_flag.set()
         active_registry.terminate_all(timeout=2.0)
     finally:
+        with terminate_lock:
+            if cancel is not None and cancel.is_cancelled:
+                interrupted_flag.set()
+            run_finished.set()
+            helper = terminate_thread
+        if helper is not None:
+            helper.join()
         if install_signals:
             if prev_sigint is not None:
                 signal.signal(signal.SIGINT, prev_sigint)
@@ -485,6 +643,25 @@ def execute_plan(
 
     summary.results = [res for res in ordered_results if res is not None]
     summary.interrupted = interrupted_flag.is_set() or active_registry.is_interrupted
+
+    if on_event is not None:
+        # Unfinished items are reported strictly via CANCELLED events, not RunSummary.results.
+        # Use NOT_RUN_MESSAGE only when fail_fast stopped remaining items without an interrupt.
+        cancelled_message = (
+            NOT_RUN_MESSAGE if (fail_fast and failed_seen and not summary.interrupted) else None
+        )
+        for idx, item in enumerate(plan_items):
+            if ordered_results[idx] is None:
+                on_event(
+                    TrackEvent(
+                        index=idx,
+                        source=item.media_input.path,
+                        stage=TrackStage.CANCELLED,
+                        action=item.action,
+                        message=cancelled_message,
+                    )
+                )
+
     return summary
 
 
