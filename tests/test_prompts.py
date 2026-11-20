@@ -473,3 +473,30 @@ def test_always_prompt_keeps_confident_matches_after_fallback_all_and_outage(
     outage_by_name = {item.media_input.path.name: item for item in plan_outage}
     assert outage_by_name["b_confident.mp4"].candidate is confident
     assert outage_by_name["a_uncertain.mp4"].candidate is None
+
+
+def test_filename_english_names_replace_flipped_sort_names_after_online_match() -> None:
+    from audio_from_video.planner import _apply_filename_english_names
+
+    meta = TrackMetadata(
+        artist="Chuan Chao {趙傳}",
+        album_artist="Chuan Chao {趙傳}",
+        title="我很醜\uff0c可是我很溫柔",
+        album="我很醜\uff0c可是我很溫柔",
+        match_status=MatchStatus.EXACT,
+        source_description="musicbrainz",
+    )
+    hints = ParsedHints(
+        artist="Zhao Chuan {趙傳}",
+        title="I'm Not Good Looking but I'm Very Gentle {我很醜可是我很溫柔}",
+    )
+    _apply_filename_english_names(meta, hints)
+    assert meta.artist == "Zhao Chuan {趙傳}"
+    assert meta.album_artist == "Zhao Chuan {趙傳}"
+    assert meta.title == "I'm Not Good Looking but I'm Very Gentle {我很醜\uff0c可是我很溫柔}"
+    assert meta.album == "我很醜\uff0c可是我很溫柔"  # Albums are left to MusicBrainz.
+
+    # A different artist is never renamed.
+    other = TrackMetadata(artist="張學友", match_status=MatchStatus.EXACT)
+    _apply_filename_english_names(other, hints)
+    assert other.artist == "張學友"

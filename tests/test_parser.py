@@ -458,3 +458,133 @@ def test_hintless_file_without_tags_marked_hintless() -> None:
     assert hints.is_hintless is True
     assert hints.trusted_artist is False
     assert hints.trusted_title is False
+
+
+def test_title_only_downloader_tags_prefer_the_filename_title() -> None:
+    """Real-world regression: 4K Video Downloader+ stores only the raw video title."""
+    elevation = parse_hints(
+        _probe(
+            "/x/Christian/Elevation Worship - Praise (feat. Brandon Lake, Chris Brown & "
+            "Chandler Moore).mp4",
+            {"title": "Praise | Elevation Worship"},
+        )
+    )
+    assert elevation.artist == "Elevation Worship"
+    assert elevation.title == "Praise"
+    assert elevation.trusted_artist is True
+
+    zhao = parse_hints(
+        _probe(
+            "/x/Zhao Chuan {趙傳} - At Last I Have Lost You {我終於失去了妳}"
+            "Official Music Video.mp4",
+            {
+                "title": "趙傳 Chao Chuan【我終於失去了妳 At Last I Have Lost You】"
+                "Official Music Video"
+            },
+        )
+    )
+    assert zhao.artist == "Zhao Chuan {趙傳}"
+    assert zhao.title == "At Last I Have Lost You {我終於失去了妳}"
+
+    # A clean classical title tag that does not repeat the artist is still preferred.
+    classical = parse_hints(
+        _probe("/x/Beethoven - Fifth.mp4", {"title": "Symphony No. 5 - Allegro con brio"})
+    )
+    assert classical.title == "Symphony No. 5 - Allegro con brio"
+
+
+def test_bilingual_context_trimmed_lyric_video_noise_and_tv_show_artist() -> None:
+    han = parse_hints(
+        _probe(
+            "/x/Han Hong {韩红} - Hai Kuo Tian Kong {海阔天空} at I Am A Singer 3 EP 5 "
+            "{我是歌手 3}.mp4"
+        )
+    )
+    assert han.title == "Hai Kuo Tian Kong {海阔天空}"
+
+    getty = parse_hints(
+        _probe("/x/Kristyn Getty - Before the Throne of God Above Official Lyric Video.mp4")
+    )
+    assert getty.title == "Before the Throne of God Above"
+
+    show = parse_hints(
+        _probe("/x/Come Sing With Me S02 - Chief Zhao's I'm ugly but gentle Ep.3 Single.mp4")
+    )
+    assert show.trusted_artist is False
+
+
+def test_embedded_title_kept_when_only_prefixed_or_word_matched() -> None:
+    """Review regressions: sanitized filenames and short artist names keep the tag title."""
+    cases = [
+        (
+            "/x/4 Non Blondes - What's Up_.mp4",
+            "4 Non Blondes - What's Up? (Official Music Video)",
+            "What's Up?",
+        ),
+        (
+            "/x/The Black Eyed Peas - Where Is The Love_ (Official Music Video).mp4",
+            "The Black Eyed Peas - Where Is The Love? (Official Music Video)",
+            "Where Is The Love?",
+        ),
+        ("/x/Queen - KQ.mp4", "Killer Queen", "Killer Queen"),
+        ("/x/Yes - Roundabout live cut.mp4", "Yesterday and Today", "Yesterday and Today"),
+        # Reversed "Title - Artist" tags drop the artist suffix (any name length).
+        ("/x/Michael Jackson - Who Is It_.mp4", "Who Is It? - Michael Jackson", "Who Is It?"),
+        ("/x/M - Pop Muzik.mp4", "Pop Muzik - M", "Pop Muzik"),
+        # A hyphen without spaces is part of a word, not a separator.
+        ("/x/Yes - Roundabout.mp4", "Yes-Man Blues", "Yes-Man Blues"),
+        # Raw video titles still lose to the cleaner filename title.
+        (
+            "/x/Panic! At The Disco - I Write Sins Not Tragedies.mp4",
+            "Panic! At The Disco: I Write Sins Not Tragedies [OFFICIAL VIDEO]",
+            "I Write Sins Not Tragedies",
+        ),
+        ("/x/Prince - 1999.mp4", "Prince - 1999 (Official Music Video)", "1999"),
+        ("/x/周杰倫 - 晴天.mp4", "周杰倫 Jay Chou【晴天 Sunny Day】Official MV", "晴天"),
+    ]
+    for path, tag, expected in cases:
+        assert parse_hints(_probe(path, {"title": tag})).title == expected, path
+
+
+def test_latin_braces_are_not_bilingual_and_tv_rule_needs_a_show_name() -> None:
+    acoustic = parse_hints(_probe("/x/Artist - Song {Live} at Wembley.mp4"))
+    assert acoustic.title == "Song {Live} at Wembley"
+
+    for name in ("S4", "Season 5", "EP 7"):
+        assert parse_hints(_probe(f"/x/{name} - Song.mp4")).trusted_artist is True, name
+    assert parse_hints(_probe("/x/Come Sing With Me S02 - Song.mp4")).trusted_artist is False
+
+
+def test_edition_flags_come_only_from_qualifiers_not_names() -> None:
+    """Review regression: a bare 'Live' or 'Acoustic' in a name never requests a version."""
+    no_flags = [
+        "/x/Oasis - Live Forever.mp4",
+        "/x/Wings - Live and Let Die.mp4",
+        "/x/T.I. - Live Your Life.mp4",
+        "/x/Live - Lightning Crashes.mp4",
+        "/x/Acoustic Alchemy - Mr. Chow.mp4",
+        "/x/The Remix Kings - Song.mp4",
+    ]
+    for path in no_flags:
+        assert parse_hints(_probe(path)).edition_flags == [], path
+
+    expected = {
+        "/x/Oasis - Live Forever (Live).mp4": ["live"],
+        "/x/Artist - Song live at Wembley.mp4": ["live"],
+        "/x/Artist - Song - Live 1985.mp4": ["live"],
+        "/x/Artist - Song (Acoustic).mp4": ["acoustic"],
+        "/x/Fleetwood Mac - Dreams (2004 Remaster).mp4": ["remaster"],
+        "/x/Mr. Probz - Waves - Robin Schulz Remix.mp4": ["remix"],
+        # Noise after the qualifier, follow-on words, two flag words, and curly braces.
+        "/x/Artist - Song Live HD.mp4": ["live"],
+        "/x/Artist - Song Live Official Video.mp4": ["live"],
+        "/x/Artist - Song DJ X Remix Official Video.mp4": ["remix"],
+        "/x/Artist - Song Live Version.mp4": ["live"],
+        "/x/Artist - Song Acoustic Version.mp4": ["acoustic"],
+        "/x/Artist - Song Instrumental Version.mp4": ["instrumental"],
+        "/x/Artist - Song Live Acoustic.mp4": ["live", "acoustic"],
+        "/x/Artist - Song {Live}.mp4": ["live"],
+        "/x/Artist - Song {Acoustic}.mp4": ["acoustic"],
+    }
+    for path, flags in expected.items():
+        assert parse_hints(_probe(path)).edition_flags == flags, path

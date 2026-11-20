@@ -9,7 +9,12 @@ from pathlib import Path
 
 from rapidfuzz import fuzz
 
-from audio_from_video.formatting import normalize_featuring, strip_diacritics_casefold
+from audio_from_video.formatting import (
+    normalize_featuring,
+    split_bilingual,
+    strip_diacritics_casefold,
+    trim_bilingual_context,
+)
 from audio_from_video.models import ParsedHints, ProbeResult
 
 # Signal 1: Video-platform URLs inside purl, comment, description, or synopsis.
@@ -57,11 +62,15 @@ _NOISE_BRACKET_RE = re.compile(
 # Trailing YouTube 11-character base64url ID in square brackets, e.g. [dQw4w9WgXcQ].
 _YOUTUBE_ID_BRACKET_RE = re.compile(r"\s*\[[A-Za-z0-9_-]{11}\]\s*$")
 _TRAILING_NOISE_TOKEN_RE = re.compile(
-    r"(?:\s+[-|]\s+|\s+)(?:official\s+(?:music\s+)?video|official\s+audio|lyrics?|hd|4k|1080p|mv|m/v)\s*$",
+    # Separated by " - ", " | ", a space, or glued to a closing bracket ("…}Official Music
+    # Video" or "…】Official MV").
+    r"(?:\s+[-|]\s+|\s+|(?<=[\}\)\]\u3011\u300b\uff09]))"
+    r"(?:official\s+(?:music\s+|lyrics?\s+)?video|official\s+audio|official\s+mv|"
+    r"official\s+visualizer|lyrics?\s+video|lyrics?|hd|4k|1080p|mv|m/v)\s*$",
     re.IGNORECASE,
 )
 
-# Edition keyword flags captured from filename/title before stripping.
+# Edition keyword flags captured from filename/title qualifiers before stripping.
 _EDITION_FLAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("live", re.compile(r"\blive\b", re.IGNORECASE)),
     ("remix", re.compile(r"\bremix\b", re.IGNORECASE)),
@@ -69,6 +78,71 @@ _EDITION_FLAG_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("instrumental", re.compile(r"\binstrumental\b", re.IGNORECASE)),
     ("remaster", re.compile(r"\bremaster(?:ed)?\b", re.IGNORECASE)),
 )
+_FLAG_WORDS = r"(?:live|remix|acoustic|instrumental|remaster(?:ed)?)"
+_QUALIFIER_BRACKET_RE = re.compile(
+    r"[\(\[\{\uff08\u3010\uff3b]([^\)\]\}\uff09\u3011\uff3d]*)[\)\]\}\uff09\u3011\uff3d]"
+)
+_FLAG_FOLLOW_ON = (
+    r"(?:\s+(?:at|in|from|on|@)\s.+|\s+(?:version|edit|mix|session|recording|take)\b.*|"
+    r"\s+(?:19|20)\d{2})?"
+)
+# A dash tail that is clearly an edition ("Live", "Live at Wembley", "Live 1985",
+# "Acoustic Version", "2012 Remaster", or "Cedric Gervais Remix"), never "Live Forever".
+_FLAG_DASH_SEGMENT_RE = re.compile(
+    rf"^(?:(?:19|20)\d{{2}}\s+)?(?:{_FLAG_WORDS}\s+)*{_FLAG_WORDS}{_FLAG_FOLLOW_ON}$"
+    r"|^.+\s(?:remix|remaster(?:ed)?)$",
+    re.IGNORECASE,
+)
+# A trailing qualifier phrase after other title words ("Song live at Wembley", "Song Live",
+# "Song Acoustic Version", or "Song Live Acoustic").
+_FLAG_TRAILING_RE = re.compile(
+    rf"\S\s+((?:{_FLAG_WORDS}\s+)*{_FLAG_WORDS}){_FLAG_FOLLOW_ON}\s*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_trailing_noise(text: str) -> str:
+    cleaned = _NOISE_BRACKET_RE.sub(" ", text)
+    prev = None
+    while prev != cleaned:
+        prev = cleaned
+        cleaned = _TRAILING_NOISE_TOKEN_RE.sub("", cleaned)
+    return cleaned
+
+
+def _edition_flag_sources(text: str) -> tuple[set[str], set[str]]:
+    """Return (hard, soft) edition flags.
+
+    Hard flags come from brackets or clear edition dash tails. Soft flags come only from an
+    unbracketed trailing phrase, which may be part of the real title ("We Live in Brooklyn,
+    Baby" looks like "Song Live at Wembley").
+    """
+    bracket_texts = [m.group(1) for m in _QUALIFIER_BRACKET_RE.finditer(text)]
+    unbracketed = _strip_trailing_noise(_QUALIFIER_BRACKET_RE.sub(" ", text))
+    segments = [s.strip() for s in _DASH_SPLIT_RE.split(unbracketed) if s.strip()]
+    hard_texts = bracket_texts + [s for s in segments[1:] if _FLAG_DASH_SEGMENT_RE.match(s)]
+    soft_text = ""
+    if segments:
+        trailing = _FLAG_TRAILING_RE.search(segments[-1])
+        if trailing:
+            soft_text = trailing.group(0)
+    hard_joined = " ".join(hard_texts)
+    hard = {flag for flag, pattern in _EDITION_FLAG_PATTERNS if pattern.search(hard_joined)}
+    soft = {flag for flag, pattern in _EDITION_FLAG_PATTERNS if pattern.search(soft_text)} - hard
+    return hard, soft
+
+
+def _edition_flags(text: str) -> list[str]:
+    """Edition flags from qualifiers only, never from artist names or leading title words.
+
+    'Oasis - Live Forever', 'Live - Lightning Crashes', and 'Acoustic Alchemy - Mr. Chow'
+    get no flags; 'Song (Live)', 'Song {Acoustic}', 'Song - Live at Wembley', 'Song live at
+    Wembley', and 'Song Live HD' do.
+    """
+    hard, soft = _edition_flag_sources(text)
+    found = hard | soft
+    return [flag for flag, _pattern in _EDITION_FLAG_PATTERNS if flag in found]
+
 
 # Leading disc/track prefixes: "2-01 ", "1-02 - ", "01 - ", "01. ", "01 ".
 _DISC_TRACK_PREFIX_RE = re.compile(r"^(\d{1,2})\s*[-.]\s*(\d{2,3})(?:\s*[-._]\s*|\s+)(.+)$")
@@ -136,6 +210,46 @@ GENERIC_FOLDER_STOP_LIST: frozenset[str] = frozenset(
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _TRACK_TOTAL_RE = re.compile(r"^(\d+)(?:\s*/\s*(\d+))?$")
+
+# Season or episode markers after other words reveal a TV show name in the artist position
+# ("Come Sing With Me S02"); a bare "S4" or "Season 5" may be a real artist name.
+_TV_SHOW_ARTIST_RE = re.compile(
+    r"\S\s+(?:S\d{1,2}(?:E\d{1,3})?|season\s*\d+|ep(?:isode)?\.?\s*\d+)\b",
+    re.IGNORECASE,
+)
+# Separators and brackets typical of raw video titles rather than clean song titles.
+_VIDEO_TITLE_MARK_RE = re.compile(r"\s\|\s|[\u3010\u3011\u300a\u300b]")
+_ARTIST_EDGE_SEPARATORS = r"(?:\s+[-\u2013\u2014]\s|\s*[:|\u3010\u300a(\[])"
+_ARTIST_TAIL_SEPARATORS = r"(?:\s[-\u2013\u2014]\s+|[:|\u3011\u300b)\]]\s*)"
+
+
+def _looks_like_video_title(emb_title: str, fn_artist: str) -> bool:
+    """True when an embedded title tag is a raw video title, not a clean song title.
+
+    Signs: video-title separators (" | ", 【…】, or 《…》), or the artist name set off by
+    a separator at either end ("Praise | Elevation Worship" or "Artist: Title"). A plain
+    word match is not enough, so 'Killer Queen' by Queen stays a song title.
+    """
+    if _VIDEO_TITLE_MARK_RE.search(emb_title):
+        return True
+    text = emb_title.strip()
+    names = [fn_artist]
+    parts = split_bilingual(fn_artist)
+    if parts is not None:
+        eng, orig = parts
+        names.append(orig)
+        if eng:
+            names.append(eng)
+    for name in names:
+        clean = name.strip()
+        if len(clean) < 2:
+            continue
+        escaped = re.escape(clean)
+        if re.match(rf"{escaped}{_ARTIST_EDGE_SEPARATORS}", text, re.IGNORECASE):
+            return True
+        if re.search(rf"{_ARTIST_TAIL_SEPARATORS}{escaped}$", text, re.IGNORECASE):
+            return True
+    return False
 
 
 def is_edition_suffix(segment: str) -> bool:
@@ -246,7 +360,7 @@ def clean_video_text(raw: str, *, replace_underscores: bool = True) -> tuple[str
         and not _HINTLESS_STEM_RE.match(raw)
         else raw
     )
-    flags = [flag for flag, pattern in _EDITION_FLAG_PATTERNS if pattern.search(text)]
+    flags = _edition_flags(text)
 
     cleaned = _YOUTUBE_ID_BRACKET_RE.sub("", text)
     cleaned = _NOISE_BRACKET_RE.sub(" ", cleaned)
@@ -601,6 +715,14 @@ def parse_hints(
         for flag in title_flags:
             if flag not in edition_flags:
                 edition_flags.append(flag)
+    # A flag is soft only when every source that set it was a bare trailing phrase.
+    hard_sources: set[str] = set()
+    soft_sources: set[str] = set()
+    for source in (probe.path.stem, emb_title or ""):
+        hard, soft = _edition_flag_sources(source)
+        hard_sources |= hard
+        soft_sources |= soft
+    soft_edition_flags = [f for f in edition_flags if f in soft_sources - hard_sources]
 
     artist: str | None = None
     album_artist: str | None = emb_album_artist
@@ -626,6 +748,15 @@ def parse_hints(
             and not is_edition_suffix(prefix_parts[1])
         ):
             return prefix_parts[1].strip()
+        # Reversed "Title - Artist" form ("Who Is It? - Michael Jackson", "Pop Muzik - M").
+        suffix_parts = _DASH_SPLIT_RE.split(raw_title)
+        if (
+            len(suffix_parts) == 2
+            and strip_diacritics_casefold(suffix_parts[1])
+            == strip_diacritics_casefold(known_artist)
+            and suffix_parts[0].strip()
+        ):
+            return suffix_parts[0].strip()
         return raw_title
 
     if not signals:
@@ -647,12 +778,19 @@ def parse_hints(
                 # Filename already yields an artist (e.g., "Beethoven - Fifth.mp4" with
                 # title tag "Symphony No. 5 - Allegro con brio"): keep filename's artist
                 # and only strip a matching redundant "<fn_artist> - " prefix if present.
+                # Some downloaders (e.g., 4K Video Downloader+) store only the raw video
+                # title ("Praise | Elevation Worship" or "趙傳 Chao Chuan【…】Official Music
+                # Video"); then the filename's own title is the cleaner hint.
                 artist = fn_artist
-                title = (
+                stripped_emb = (
                     _strip_redundant_artist_prefix(cleaned_emb_title, fn_artist)
                     if cleaned_emb_title
-                    else fn_title
+                    else None
                 )
+                if stripped_emb and fn_title and _looks_like_video_title(stripped_emb, fn_artist):
+                    title = fn_title
+                else:
+                    title = stripped_emb or fn_title
                 if title is not None:
                     swapped_candidate = (title, fn_artist)
             else:
@@ -739,7 +877,13 @@ def parse_hints(
             album = None
 
     # Normalize featuring artists across artist and title.
+    if title:
+        title = trim_bilingual_context(title)
     norm_artist, norm_title, featuring = normalize_featuring(artist, title)
+
+    # A TV show or season name ("Come Sing With Me S02") is never a trustworthy artist.
+    if norm_artist and _TV_SHOW_ARTIST_RE.search(norm_artist):
+        trusted_artist = False
 
     track_num = emb_track if emb_track is not None else fn_track
     disc_num = emb_disc if emb_disc is not None else fn_disc
@@ -762,6 +906,7 @@ def parse_hints(
         parent_album_hint=parent_album_hint,
         parent_artist_hint=parent_artist_hint,
         edition_flags=edition_flags,
+        soft_edition_flags=soft_edition_flags,
         downloader_signals=signals,
         trusted_artist=trusted_artist,
         trusted_title=trusted_title,

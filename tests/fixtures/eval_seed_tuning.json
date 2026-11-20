@@ -845,5 +845,63 @@
       "disc_number": null
     },
     "notes": "Surname-only artist hint."
+  },
+  {
+    "id": "t-clear-28",
+    "category": "clear",
+    "input": {
+      "filename": "Oasis - Live Forever (Official Video).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 278
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Oasis",
+      "title": "Live Forever",
+      "album": "Definitely Maybe",
+      "track_number": 3,
+      "disc_number": null
+    },
+    "notes": "Bare 'Live' as the first word of the title must not request a live recording; the studio track is on Definitely Maybe (1994), and live releases are decoys."
+  },
+  {
+    "id": "t-clear-29",
+    "category": "clear",
+    "input": {
+      "filename": "Live - Lightning Crashes.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 325
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Live",
+      "title": "Lightning Crashes",
+      "album": "Throwing Copper",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "The band Live: the artist name must not request a live recording; the studio track is on Throwing Copper (1994)."
+  },
+  {
+    "id": "t-clear-30",
+    "category": "clear",
+    "input": {
+      "filename": "The Script - Breakeven (Acoustic).mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 244
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "The Script",
+      "title": "Breakeven",
+      "title_contains": "acoustic",
+      "album": "The Acoustic Sessions 2",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "A requested acoustic version must win over the studio Breakeven (2008, about 261 s); the acoustic recording (about 244 s) is on the EP The Acoustic Sessions 2 (2021)."
   }
 ]

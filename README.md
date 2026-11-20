@@ -236,6 +236,22 @@ Each match is sorted into one of three groups:
 If the online services become unreachable during a run, `afv` stops prompting after one notice:
 confident matches already found are applied, and the rest use the fallback.
 
+Live, acoustic, instrumental, demo, and remix recordings are only applied automatically when
+the filename asks for them, as in `Song (Live).mp4`. The reverse also holds: `Song (Acoustic).mp4`
+gets the acoustic recording, and prompts rather than silently taking the studio version when no
+acoustic recording is found. Brackets or a dash (`Song (Live)` or `Song - Live at Wembley`) are
+the clearest way to ask; a bare phrase such as `Song Live at Wembley` also works, but titles
+that merely contain the words (*We Live in Brooklyn, Baby*) are matched as titles. A song best
+known from a live album (for
+example, a track from *MTV Unplugged in New York*) therefore prompts on a terminal and uses the
+fallback in scripts; add "(Live)" to the filename or pick the match at the prompt. Likewise, a
+song found only on a Various Artists compilation (such as a soundtrack) prompts unless its folder
+names that album.
+
+A folder name is used as an album hint only for numbered tracks or an
+`<Artist>/<Album>/` layout, and only when MusicBrainz actually has a release with that name, so
+playlist folders such as `Road Trip/` or `hits/` never decide the album.
+
 The **fallback** keeps what the file itself says: `<Artist>/Unknown Album/` when the artist and
 title are reliable, otherwise `_unmatched/`. Uncertain matches are never applied without asking;
 in `--non-interactive` mode they are listed in the summary and the `--report` file instead.
@@ -244,6 +260,15 @@ For artists, albums, and titles in a non-Latin script, `afv` looks up the offici
 name and writes both, as in `Jacky Cheung {張學友}`. When no English name exists, it asks once
 per artist or album. You can type a name (`a`), keep the original for this item (`k`), for this
 whole artist or album (`A`), or for the rest of the run (`K`).
+
+Filenames that already use this form, such as `Zhao Chuan {趙傳} - At Last I Have Lost You
+{我終於失去了妳}.mp4`, are searched by their original-script names, and your English names are
+kept in the tags. Traditional and Simplified Chinese are treated as the same text when matching,
+and artist folders that differ only in script are merged within a run.
+
+Some downloaders (for example, 4K Video Downloader+) store the raw video title as the only tag,
+as in `Praise | Elevation Worship`. When that tag repeats the artist or uses video-title
+punctuation, `afv` uses the cleaner title from the filename instead.
 
 ## Loudness normalization
 
@@ -361,7 +386,9 @@ executable) must comply with the GPL for that bundle.
 
 Other dependencies: [Typer](https://typer.tiangolo.com/) and [Rich](https://github.com/Textualize/rich)
 (MIT), [HTTPX](https://www.python-httpx.org/) (BSD-3-Clause), [Pillow](https://python-pillow.org/)
-(MIT-CMU), [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) (MIT), and
+(MIT-CMU), [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) (MIT),
+[opencc-python-reimplemented](https://github.com/yichen0831/opencc-python) (Apache-2.0, used
+to compare Traditional and Simplified Chinese), and
 [platformdirs](https://github.com/tox-dev/platformdirs) (MIT). Metadata comes from
 [MusicBrainz](https://musicbrainz.org/) (CC0 core data), cover art from the
 [Cover Art Archive](https://coverartarchive.org/), and fallback data from the

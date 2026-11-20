@@ -58,14 +58,24 @@ def _checkpoint_path(out_path: Path) -> Path:
     return out_path.with_name(f"{stem}.partial.json")
 
 
-def _load_checkpoint(checkpoint_path: Path, seed_sha: str) -> dict[str, dict[str, object]]:
+def _load_checkpoint(
+    checkpoint_path: Path, seed_sha: str, *, require_seed_match: bool = True
+) -> dict[str, dict[str, object]]:
+    """Load clean 200/404 responses from a checkpoint or corpus file.
+
+    Checkpoints only resume a run over the same seed file. An existing frozen corpus
+    (--reuse-existing) is reused even after seeds are added, since responses are keyed by
+    URL and do not depend on seed labels.
+    """
     if not checkpoint_path.is_file():
         return {}
     try:
         data = load_corpus(checkpoint_path)
     except (OSError, ValueError):
         return {}
-    if isinstance(data, dict) and data.get("seed_file_sha256") == seed_sha:
+    if isinstance(data, dict) and (
+        not require_seed_match or data.get("seed_file_sha256") == seed_sha
+    ):
         responses = data.get("responses")
         if isinstance(responses, dict):
             return {
@@ -127,8 +137,11 @@ def record_split(
     seeds = load_seeds(seed_path)
     ckpt = _checkpoint_path(out_path)
     initial = _load_checkpoint(ckpt, seed_sha)
-    if not initial and reuse_existing and out_path.is_file():
-        initial = _load_checkpoint(out_path, seed_sha)
+    existing: dict[str, dict[str, object]] = {}
+    if reuse_existing and out_path.is_file():
+        existing = _load_checkpoint(out_path, seed_sha, require_seed_match=False)
+        # Existing frozen responses always win, so they are never re-fetched or replaced.
+        initial = {**initial, **existing}
     lookup_seeds = sum(
         1 for s in seeds if s["expected"]["outcome"] not in ("parse_only", "skip_lookup")
     )
@@ -259,7 +272,10 @@ def record_split(
 
     if file_sha256(seed_path) != seed_sha:
         raise RuntimeError(f"{seed_path} changed during recording; aborting.")
-    corpus = build_frozen_corpus(seeds, seed_sha, recorder.valid_responses())
+    # With --reuse-existing, keep every existing response (even ones the current code no
+    # longer requests) byte for byte, and add only newly fetched URLs.
+    responses = {**recorder.valid_responses(), **existing}
+    corpus = build_frozen_corpus(seeds, seed_sha, responses)
     write_corpus(out_path, corpus)
     if ckpt.exists():
         ckpt.unlink()
@@ -286,7 +302,10 @@ def main(
     parser.add_argument(
         "--reuse-existing",
         action="store_true",
-        help="Seed the recorder with matching 200/404 responses from an existing corpus file.",
+        help=(
+            "Reuse every response in the existing corpus file (even after seeds are added); "
+            "only URLs missing from it are fetched, and existing responses are kept as-is."
+        ),
     )
     args = parser.parse_args(argv)
     try:

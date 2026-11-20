@@ -133,7 +133,7 @@ def run_doctor(
     if not cache_ok:
         messages.append(cache_detail)
 
-    cfg_status = "exists" if config.config_path.is_file() else "not created yet (using defaults)"
+    cfg_status = "exists" if config.config_path.is_file() else "not created yet; using defaults"
     table.add_row("Config file", "[green]OK[/green]", f"{config.config_path} ({cfg_status})")
 
     console.print(table)

@@ -454,6 +454,16 @@ class MusicBrainzClient:
             return fallback
         return payload
 
+    def search_candidates_terms(self, title: str, artist: str | None = None) -> list[Candidate]:
+        """Unquoted term search (tolerates punctuation inside titles, e.g. full-width commas).
+
+        A quoted phrase without the comma misses an original title that contains a
+        full-width comma; an unquoted term search finds both spellings.
+        """
+        return recordings_to_candidates(
+            self._search(build_recording_query(title, artist, quoted=False)) or {}
+        )
+
     def search_candidates(
         self,
         title: str,

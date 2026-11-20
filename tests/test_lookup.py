@@ -730,6 +730,160 @@ def test_album_override_and_topic_album_stay_active_with_downloader_signals() ->
     assert res._base_query(topic_hints, 218.0).album_hint == "Rumours"
 
 
+def test_arbitrary_parent_folder_is_not_used_as_album_filter() -> None:
+    """Live-run regression: a folder named 'in' became release:"in" and hid Rumours."""
+    res = _resolver(Router(), with_itunes=False)
+    loose = ParsedHints(
+        artist="Fleetwood Mac",
+        title="Dreams",
+        parent_album_hint="in",
+        parent_artist_hint="run",
+        trusted_artist=True,
+    )
+    assert res._base_query(loose, 257.0).album_hint is None
+
+    numbered = ParsedHints(
+        title="Aerodynamic",
+        track_number=2,
+        parent_album_hint="Discovery",
+        parent_artist_hint="Daft Punk",
+    )
+    assert res._base_query(numbered, 212.0).album_hint == "Discovery"
+
+    artist_folder = ParsedHints(
+        artist="Daft Punk",
+        title="Digital Love",
+        parent_album_hint="Discovery",
+        parent_artist_hint="Daft Punk",
+        trusted_artist=True,
+    )
+    assert res._base_query(artist_folder, 301.0).album_hint == "Discovery"
+
+
+FM = credit(("Fleetwood Mac", "", "artist-fm", "Fleetwood Mac"))
+
+
+def _dreams(rec_id: str, rel: dict, length_ms: int = 257_000) -> dict:
+    return recording(rec_id, "Dreams", FM, [rel], length_ms=length_ms)
+
+
+def _rumours_rel() -> dict:
+    return release("rel-rumours", "Rumours", "rg-rumours", date="1977-02-04", track_number=2)
+
+
+def _folder_router(folder: str, filtered_release: dict) -> Router:
+    """Filtered search returns only filtered_release; unfiltered searches add Rumours."""
+    router = Router()
+    router.json(
+        query_has(f'release:"{folder}"'),
+        search_payload(_dreams("rec-filtered", filtered_release)),
+    )
+    router.json(
+        query_has('recording:"Dreams"'),
+        search_payload(
+            _dreams("rec-studio", _rumours_rel()),
+            _dreams("rec-filtered", filtered_release),
+        ),
+    )
+    return router
+
+
+def _unfiltered_requests(router: Router) -> list[str]:
+    return [
+        r.url.params.get("query", "")
+        for r in router.log
+        if r.url.path.endswith("/recording/") and "release:" not in r.url.params.get("query", "")
+    ]
+
+
+def test_folder_filter_discarded_when_no_release_carries_the_folder_name() -> None:
+    """Review regression: numbered files in hits/ or in/ must still find the studio album."""
+    hits_rel = release(
+        "rel-gh",
+        "Greatest Hits",
+        "rg-gh",
+        secondary=("Compilation",),
+        date="1988-11-21",
+        track_number=3,
+    )
+    for folder, filtered_rel, track in (
+        ("hits", hits_rel, 3),
+        (
+            "in",
+            release(
+                "rel-boston",
+                "Live in Boston",
+                "rg-boston",
+                secondary=("Live",),
+                date="2004-03-01",
+                track_number=2,
+            ),
+            1,
+        ),
+    ):
+        router = _folder_router(folder, filtered_rel)
+        res = _resolver(router, with_itunes=False)
+        hints = ParsedHints(
+            artist="Fleetwood Mac",
+            title="Dreams",
+            track_number=track,
+            parent_album_hint=folder,
+            trusted_artist=True,
+            trusted_title=True,
+        )
+        result = res.resolve(hints, 257.0)
+        assert _unfiltered_requests(router), f"{folder}/: studio album was never searched"
+        assert result.best is not None
+        assert result.best.album == "Rumours", folder
+        assert result.decision == MatchDecision.AUTO_ACCEPT, folder
+
+
+def test_matching_folder_filter_is_kept() -> None:
+    router = _folder_router("Rumours", _rumours_rel())
+    res = _resolver(router, with_itunes=False)
+    hints = ParsedHints(
+        artist="Fleetwood Mac",
+        title="Dreams",
+        track_number=2,
+        parent_album_hint="Rumours",
+        trusted_artist=True,
+        trusted_title=True,
+    )
+    result = res.resolve(hints, 257.0)
+    assert result.decision == MatchDecision.AUTO_ACCEPT
+    assert result.best is not None and result.best.album == "Rumours"
+    assert _unfiltered_requests(router) == []
+
+
+def test_blocked_high_score_match_still_broadens_search() -> None:
+    """A matching folder that only yields a live album is blocked, so search wider."""
+    boston = release(
+        "rel-boston",
+        "Live in Boston",
+        "rg-boston",
+        secondary=("Live",),
+        date="2004-03-01",
+        track_number=2,
+    )
+    router = _folder_router("Live in Boston", boston)
+    res = _resolver(router, with_itunes=False)
+    hints = ParsedHints(
+        artist="Fleetwood Mac",
+        title="Dreams",
+        track_number=2,
+        parent_album_hint="Live in Boston",
+        trusted_artist=True,
+        trusted_title=True,
+    )
+    result = res.resolve(hints, 257.0)
+    assert _unfiltered_requests(router), "blocked match must trigger the wider search"
+    assert result.best is not None
+    # Never a silent live-album auto-accept for a file that did not ask for a live version.
+    assert not (
+        result.decision == MatchDecision.AUTO_ACCEPT and result.best.album == "Live in Boston"
+    )
+
+
 def test_batch_coherence_respects_majority_and_explicit_remix() -> None:
     router = Router()
     router.json(
@@ -1301,3 +1455,180 @@ def test_cross_attempt_margin_prevents_alias_attempt_overriding_primary_artist()
     )
     assert res.best is not None and res.best.artist == "Кино"
     assert all("Симфоническое" not in r.url.params.get("query", "") for r in router.log)
+
+
+ZC = credit(("趙傳", "", "artist-zc", "Chao, Chuan"))
+
+
+def test_bilingual_filename_names_search_native_script_and_skip_swapped_retry() -> None:
+    router = Router()
+    res = _resolver(router, with_itunes=False)
+    hints = ParsedHints(
+        artist="Zhao Chuan {趙傳}",
+        title="At Last I Have Lost You {我終於失去了妳}",
+        trusted_artist=True,
+        trusted_title=True,
+        swapped_candidate=("At Last I Have Lost You {我終於失去了妳}", "Zhao Chuan {趙傳}"),
+    )
+    query = res._base_query(hints, 290.0)
+    assert query.artist == "趙傳"
+    assert query.artist_aliases == ("Zhao Chuan",)
+    assert query.title == "我終於失去了妳"
+
+    res.resolve(hints, 290.0)
+    queries = [r.url.params.get("query", "") for r in router.log if "/recording/" in r.url.path]
+    assert queries
+    assert all("Zhao Chuan" not in q for q in queries)  # Never searched with the English part.
+    assert all('artist:"At Last' not in q for q in queries)  # No swapped Title/Artist retry.
+
+
+def test_cjk_punctuation_retry_finds_original_album_over_compilation() -> None:
+    """Quoted search misses the original's full-width comma; the unquoted retry finds it."""
+    comp = release(
+        "rel-comp",
+        "10年朋友6",
+        "rg-comp",
+        secondary=("Compilation",),
+        date="1991-02",
+        track_number=2,
+    )
+    comp["artist-credit"] = credit(("Various Artists", "", "artist-va", "Various Artists"))
+    orig_title = "我很醜\uff0c可是我很溫柔"
+    orig = release("rel-orig", orig_title, "rg-orig", date="1988-09", track_number=2)
+    router = Router()
+    router.json(
+        query_has("recording:("),
+        search_payload(
+            recording("rec-orig", orig_title, ZC, [orig], length_ms=235_000),
+            recording("rec-comp", "我很醜可是我很溫柔", ZC, [comp], length_ms=231_000),
+        ),
+    )
+    router.json(
+        query_has('recording:"我很醜可是我很溫柔"'),
+        search_payload(recording("rec-comp", "我很醜可是我很溫柔", ZC, [comp], length_ms=231_000)),
+    )
+    res = _resolver(router, with_itunes=False)
+    hints = ParsedHints(
+        artist="Zhao Chuan {趙傳}",
+        title="I'm Not Good Looking but I'm Very Gentle {我很醜可是我很溫柔}",
+        trusted_artist=True,
+        trusted_title=True,
+    )
+    result = res.resolve(hints, 235.0)
+    assert result.best is not None
+    assert result.best.release_group_id == "rg-orig"
+    assert result.decision == MatchDecision.AUTO_ACCEPT
+
+
+def test_latin_braces_never_replace_search_terms() -> None:
+    """Review regression: 'Song {Acoustic}' and 'Artist {UK}' are not English {原文} pairs."""
+    res = _resolver(Router(), with_itunes=False)
+    acoustic = res._base_query(
+        ParsedHints(artist="Artist", title="Song {Acoustic}", trusted_artist=True), 200.0
+    )
+    assert acoustic.title != "Acoustic"
+    assert "Song" in acoustic.title
+
+    uk = res._base_query(ParsedHints(artist="Artist {UK}", title="Song", trusted_artist=True), 200)
+    assert uk.artist in ("Artist {UK}", "Artist")
+    assert uk.artist_aliases == ()
+
+    zc = res._base_query(
+        ParsedHints(artist="Zhao Chuan {趙傳}", title="Song {歌}", trusted_artist=True), 200
+    )
+    assert (zc.artist, zc.title, zc.artist_aliases) == ("趙傳", "歌", ("Zhao Chuan",))
+
+
+def test_bare_live_in_title_searches_studio_albums_and_picks_studio() -> None:
+    """Review regression: 'Oasis - Live Forever' must not search live albums only."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    oasis = credit(("Oasis", "", "artist-oasis", "Oasis"))
+    studio = release("rel-dm", "Definitely Maybe", "rg-dm", date="1994-08-29", track_number=3)
+    live = release(
+        "rel-ftm",
+        "Familiar to Millions",
+        "rg-ftm",
+        secondary=("Live",),
+        date="2000-11-13",
+        track_number=5,
+    )
+    router = Router()
+    router.json(
+        query_has("secondarytype:live"),
+        search_payload(recording("rec-live", "Live Forever", oasis, [live], length_ms=290_000)),
+    )
+    router.json(
+        query_has('recording:"Live Forever"'),
+        search_payload(
+            recording("rec-studio", "Live Forever", oasis, [studio], length_ms=277_000),
+            recording("rec-live", "Live Forever", oasis, [live], length_ms=290_000),
+        ),
+    )
+    hints = parse_hints(
+        ProbeResult(
+            path=_Path("/x/Oasis - Live Forever.mp4"), duration_seconds=278.0, format_name=None
+        )
+    )
+    assert "live" not in hints.edition_flags
+    result = _resolver(router, with_itunes=False).resolve(hints, 278.0)
+    queries = [r.url.params.get("query", "") for r in router.log if "/recording/" in r.url.path]
+    assert queries and "secondarytype:live" not in queries[0]
+    assert result.best is not None and result.best.album == "Definitely Maybe"
+    assert result.decision == MatchDecision.AUTO_ACCEPT
+
+
+def test_soft_trailing_live_flag_is_dropped_when_it_is_part_of_the_title() -> None:
+    """Review regression: 'We Live in Brooklyn, Baby' is a title, not a live request."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    def _run(filename: str, title: str, studio_title: str, live_title: str) -> tuple:
+        artist = filename.split(" - ")[0]
+        credits_ = credit((artist, "", "artist-x", artist))
+        studio = release("rel-studio", "Studio Album", "rg-studio", date="1972-01-01")
+        live = release("rel-live", "Live Album", "rg-live", secondary=("Live",), date="1980-01-01")
+        router = Router()
+        router.json(
+            query_has("secondarytype:live"),
+            search_payload(recording("rec-live", live_title, credits_, [live], length_ms=224_000)),
+        )
+        router.json(
+            query_has(f'recording:"{title}"'),
+            search_payload(
+                recording("rec-studio", studio_title, credits_, [studio], length_ms=220_000),
+                recording("rec-live", live_title, credits_, [live], length_ms=224_000),
+            ),
+        )
+        hints = parse_hints(
+            ProbeResult(path=_Path(f"/x/{filename}"), duration_seconds=220.0, format_name=None)
+        )
+        result = _resolver(router, with_itunes=False).resolve(hints, 220.0)
+        queries = [r.url.params.get("query", "") for r in router.log if "/recording/" in r.url.path]
+        return hints, result, queries
+
+    hints, result, queries = _run(
+        "Roy Ayers Ubiquity - We Live in Brooklyn, Baby.mp4",
+        "We Live in Brooklyn, Baby",
+        "We Live in Brooklyn, Baby",
+        "We Live in Brooklyn, Baby",
+    )
+    assert hints.soft_edition_flags == ["live"]
+    assert "secondarytype:live" not in queries[0]
+    assert result.best is not None and result.best.album == "Studio Album"
+    assert result.decision == MatchDecision.AUTO_ACCEPT
+
+    # "Song Live at Wembley" keeps the live request: no recording's base title has the phrase.
+    hints, result, _queries = _run(
+        "Artist - Song Live at Wembley.mp4",
+        "Song Live at Wembley",
+        "Song",
+        "Song (Live at Wembley)",
+    )
+    assert "live" in hints.edition_flags
+    assert result.best is not None and result.best.album == "Live Album"

@@ -6,6 +6,7 @@ import os
 import re
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 from audio_from_video.models import MatchStatus, TrackMetadata
 
@@ -61,6 +62,63 @@ _INLINE_FEAT_RE = re.compile(
 # intact. Only unambiguous explicit separators (';' or spaced ' / ') are split.
 _UNSTRUCTURED_FEAT_SPLIT_RE = re.compile(r"\s*(?:;\s*|\s+/\s+)")
 _ALREADY_BILINGUAL_RE = re.compile(r"^.+\s\{.+\}$")
+# "English {原文}" optionally followed by trailing context ("… {海阔天空} at Show EP 5 {…}").
+_BILINGUAL_HEAD_RE = re.compile(r"^(?P<eng>[^{}]*?)\s*\{(?P<orig>[^{}]+)\}(?P<rest>.*)$")
+_BILINGUAL_CONTEXT_RE = re.compile(r"^\s*(?:at|@|live\s+at)\b", re.IGNORECASE)
+_HAN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+_T2S_CONVERTER: Any = None
+
+
+def split_bilingual(text: str | None) -> tuple[str | None, str] | None:
+    """Split 'English {原文}' into (english or None, original); None when not bilingual.
+
+    Only a non-Latin braced part counts ('Zhao Chuan {趙傳}'), matching what
+    format_bilingual writes; Latin braces such as 'Song {Acoustic}' or 'Artist {UK}'
+    are ordinary text.
+    """
+    if not text:
+        return None
+    match = _BILINGUAL_HEAD_RE.match(text.strip())
+    if not match:
+        return None
+    orig = match.group("orig").strip()
+    if not orig or not has_non_latin(orig):
+        return None
+    eng = match.group("eng").strip(" -\u2013\u2014") or None
+    return eng, orig
+
+
+def trim_bilingual_context(text: str) -> str:
+    """Drop trailing performance context after an 'English {原文}' title.
+
+    'Hai Kuo Tian Kong {海阔天空} at I Am A Singer 3 EP 5 {我是歌手 3}' becomes
+    'Hai Kuo Tian Kong {海阔天空}'. Other trailing text (such as '(Live)' or 'in D minor')
+    is kept, and Latin braces ('Song {Live} at Wembley') are never trimmed.
+    """
+    match = _BILINGUAL_HEAD_RE.match(text.strip())
+    if not match or not has_non_latin(match.group("orig")):
+        return text
+    rest = match.group("rest")
+    if rest.strip() and ("{" in rest or _BILINGUAL_CONTEXT_RE.match(rest)):
+        eng = match.group("eng").strip()
+        orig = match.group("orig").strip()
+        return f"{eng} {{{orig}}}" if eng else f"{{{orig}}}"
+    return text
+
+
+def to_simplified_chinese(text: str) -> str:
+    """Convert Traditional Chinese characters to Simplified (no-op for non-Han text).
+
+    Used only for comparisons and grouping keys; tags keep the original script.
+    """
+    global _T2S_CONVERTER
+    if not text or not _HAN_RE.search(text):
+        return text
+    if _T2S_CONVERTER is None:
+        from opencc import OpenCC
+
+        _T2S_CONVERTER = OpenCC("t2s")
+    return str(_T2S_CONVERTER.convert(text))
 
 
 def has_non_latin(text: str) -> bool:
@@ -132,6 +190,15 @@ def utf16_len(text: str) -> int:
 def nfc_casefold(text: str) -> str:
     """Normalize text to NFC and case-fold for cross-platform path comparisons."""
     return unicodedata.normalize("NFC", text).casefold()
+
+
+def folder_grouping_key(text: str) -> str:
+    """Key for merging folder names within a batch: case, NFC, and Chinese script insensitive.
+
+    'Daft Punk' and 'daft punk' share a key, and so do 'Zhao Chuan {赵传}' and
+    'Zhao Chuan {趙傳}'.
+    """
+    return to_simplified_chinese(nfc_casefold(text))
 
 
 def compute_relative_path_budget(output_root: Path) -> tuple[int, str | None]:

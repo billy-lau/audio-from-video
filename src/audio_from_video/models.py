@@ -110,6 +110,9 @@ class ParsedHints:
     parent_album_hint: str | None = None
     parent_artist_hint: str | None = None
     edition_flags: list[str] = field(default_factory=list)
+    # Flags read only from an unbracketed trailing phrase ("We Live in Brooklyn, Baby" or
+    # "Song Live at Wembley"), which may be part of the real title.
+    soft_edition_flags: list[str] = field(default_factory=list)
     downloader_signals: list[str] = field(default_factory=list)
     trusted_artist: bool = False
     trusted_title: bool = False

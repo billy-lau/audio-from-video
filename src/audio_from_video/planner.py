@@ -17,9 +17,11 @@ from audio_from_video.formatting import (
     build_relative_path,
     compute_relative_path_budget,
     find_case_insensitive_conflict,
+    folder_grouping_key,
     format_bilingual,
     needs_english_alias,
     nfc_casefold,
+    split_bilingual,
     utf16_len,
 )
 from audio_from_video.lookup import (
@@ -53,6 +55,7 @@ from audio_from_video.probe import (
     probe_media,
     select_audio_stream,
 )
+from audio_from_video.ranking import normalize_text
 
 logger = logging.getLogger(__name__)
 
@@ -189,10 +192,10 @@ def _canonicalize_rel_folders(
         return rel_path
 
     artist_dir, album_dir, filename = rel_path.parts
-    artist_key = nfc_casefold(artist_dir)
+    artist_key = folder_grouping_key(artist_dir)
     canon_artist = canonical_artist_dirs.setdefault(artist_key, artist_dir)
 
-    album_key = (artist_key, nfc_casefold(album_dir))
+    album_key = (artist_key, folder_grouping_key(album_dir))
     canon_album = canonical_album_dirs.setdefault(album_key, album_dir)
 
     canonical_rel = Path(canon_artist) / canon_album / filename
@@ -270,6 +273,35 @@ def _allocate_destination_path(
         claimed_keys.add(key)
         note = None if index == 1 else f"renamed -> ({index})"
         return output_root / rel_path, PlanAction.EXTRACT, note
+
+
+def _apply_filename_english_names(metadata: TrackMetadata, hints: ParsedHints) -> None:
+    """Prefer the user's own 'English {原文}' names from the filename after an online match.
+
+    MusicBrainz often lacks an English alias for East Asian artists and falls back to a
+    flipped sort-name ('Chuan Chao' for 趙傳). When the filename already says
+    'Zhao Chuan {趙傳}' for the same native name, keep the user's English.
+    """
+    if metadata.match_status not in (MatchStatus.EXACT, MatchStatus.PARTIAL):
+        return
+
+    def _native(value: str) -> str:
+        parts = split_bilingual(value)
+        return parts[1] if parts is not None else value
+
+    for field_name, hint_value in (
+        ("artist", hints.artist),
+        ("album_artist", hints.artist),
+        ("title", hints.title),
+    ):
+        hint_parts = split_bilingual(hint_value)
+        current = getattr(metadata, field_name)
+        if hint_parts is None or not current or not hint_parts[0]:
+            continue
+        hint_eng, hint_orig = hint_parts
+        current_native = _native(current)
+        if normalize_text(current_native) == normalize_text(hint_orig):
+            setattr(metadata, field_name, format_bilingual(hint_eng, current_native))
 
 
 def _resolve_non_latin_aliases(
@@ -834,6 +866,8 @@ def build_plan(
                 )
                 continue
             assert metadata is not None
+            if metadata.source_description not in ("offline", "manual"):
+                _apply_filename_english_names(metadata, entry.hints)
         else:
             metadata = build_offline_metadata(
                 entry.hints,

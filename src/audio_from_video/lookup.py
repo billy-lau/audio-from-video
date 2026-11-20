@@ -19,7 +19,12 @@ from typing import Any
 import httpx
 
 from audio_from_video.config import MatchingConfig
-from audio_from_video.formatting import format_bilingual, has_non_latin, normalize_featuring
+from audio_from_video.formatting import (
+    format_bilingual,
+    has_non_latin,
+    normalize_featuring,
+    split_bilingual,
+)
 from audio_from_video.models import (
     Candidate,
     ManualOverrides,
@@ -38,9 +43,11 @@ from audio_from_video.providers.musicbrainz import (
     split_artist_credit,
 )
 from audio_from_video.ranking import (
+    _HAS_CJK_RE,
     _TAYLORS_VERSION_RE,
     Query,
     RankingOutcome,
+    _albums_match,
     _extract_part_tag,
     artist_similarity,
     choose_edition,
@@ -326,6 +333,23 @@ class TrackResolver:
             return hints.parent_artist_hint
         return None
 
+    @staticmethod
+    def _folder_album_is_credible(hints: ParsedHints) -> bool:
+        """True when the parent folder plausibly names this track's album.
+
+        Arbitrary folders ('in', 'Music Videos', or 'Favorites') must never become a strict
+        MusicBrainz release filter, which can hide the studio recording entirely. Like the
+        offline rule, require a numbered track or an Artist/Album/ layout whose artist folder
+        matches the track artist.
+        """
+        if not hints.parent_album_hint:
+            return False
+        if hints.track_number is not None:
+            return True
+        if hints.parent_artist_hint and hints.artist:
+            return normalize_text(hints.parent_artist_hint) == normalize_text(hints.artist)
+        return False
+
     def _base_query(
         self,
         hints: ParsedHints,
@@ -333,14 +357,16 @@ class TrackResolver:
         overrides: ManualOverrides = NO_OVERRIDES,
     ) -> Query:
         # Honor manual --album overrides unconditionally, and trusted "- Topic" album tags.
+        album_from_folder = False
         if overrides.album and overrides.album.strip():
             album_hint: str | None = overrides.album.strip()
         elif hints.album and (
             not hints.downloader_signals or hints.downloader_signals == ["topic_suffix"]
         ):
             album_hint = hints.album
-        elif not hints.downloader_signals:
+        elif not hints.downloader_signals and self._folder_album_is_credible(hints):
             album_hint = hints.parent_album_hint
+            album_from_folder = True
         else:
             album_hint = None
         artist = self.query_artist(hints)
@@ -352,6 +378,17 @@ class TrackResolver:
         ):
             artist = overrides.album_artist.strip()
         stripped_title = strip_qualifiers(hints.title)
+        # Filenames often carry afv's own "English {原文}" form ("Zhao Chuan {趙傳}"), but
+        # MusicBrainz names these artists and songs in their native script, so search with
+        # the native part and keep the English part as an alias for scoring.
+        artist_aliases: tuple[str, ...] = ()
+        artist_parts = split_bilingual(artist)
+        if artist_parts is not None:
+            eng_artist, artist = artist_parts
+            artist_aliases = (eng_artist,) if eng_artist else ()
+        title_parts = split_bilingual(stripped_title)
+        if title_parts is not None:
+            stripped_title = title_parts[1]
         base_markers = find_markers(stripped_title, hints.artist)
         qual_texts = extract_qualifiers(hints.title)
         stem_extra_markers = find_markers(hints.clean_stem) - base_markers
@@ -359,9 +396,12 @@ class TrackResolver:
         return Query(
             title=stripped_title,
             artist=artist,
+            artist_aliases=artist_aliases,
             album_hint=album_hint,
+            album_hint_from_folder=album_from_folder,
             duration_seconds=duration,
             edition_flags=frozenset(hints.edition_flags),
+            soft_flags=frozenset(hints.soft_edition_flags),
             markers=base_markers | qual_markers,
             qualifier_markers=qual_markers,
             raw_title=(hints.title or "").strip(),
@@ -370,6 +410,24 @@ class TrackResolver:
         )
 
     # -- Gathering ------------------------------------------------------------------
+
+    def _unfiltered_mb_search(self, query: Query, flags: set[str]) -> list[Candidate]:
+        """MusicBrainz search without an album filter (live albums when live was requested)."""
+        # A soft "live" (bare trailing phrase such as "We Live in Brooklyn, Baby") may be part
+        # of the real title, so it never limits the search to live albums.
+        if "live" in flags and "live" not in query.soft_flags:
+            return self.mb.search_candidates(
+                query.title,
+                query.artist,
+                official_only=True,
+                secondary_type="live",
+            )
+        return self.mb.search_candidates(
+            query.title,
+            query.artist,
+            official_only=True,
+            primary_type="album",
+        )
 
     def _search(
         self,
@@ -403,6 +461,8 @@ class TrackResolver:
                     cands = self.mb.search_candidates(query.title, None)
                 elif mb_mode == "broad":
                     cands = self.mb.search_candidates(query.title, query.artist, official_only=True)
+                elif mb_mode == "terms":
+                    cands = self.mb.search_candidates_terms(query.title, query.artist)
                 elif use_raw_title:
                     cands = self.mb.search_candidates(query.raw_title, query.artist)
                     if not cands:
@@ -416,20 +476,16 @@ class TrackResolver:
                         album=query.album_hint,
                         official_only=True,
                     )
-                elif "live" in flags:
-                    cands = self.mb.search_candidates(
-                        query.title,
-                        query.artist,
-                        official_only=True,
-                        secondary_type="live",
-                    )
+                    # A folder name is only a guess at the album. If no returned release
+                    # actually carries that name (e.g., release:"in" matching "Live in
+                    # Boston", or release:"hits" matching "Greatest Hits"), discard the
+                    # filtered results and search without the folder filter.
+                    if query.album_hint_from_folder and not any(
+                        _albums_match(query.album_hint, c.album) for c in cands
+                    ):
+                        cands = self._unfiltered_mb_search(query, flags)
                 else:
-                    cands = self.mb.search_candidates(
-                        query.title,
-                        query.artist,
-                        official_only=True,
-                        primary_type="album",
-                    )
+                    cands = self._unfiltered_mb_search(query, flags)
                 self._record_provider_success(provider)
                 return cands
             if self.itunes is not None:
@@ -473,33 +529,86 @@ class TrackResolver:
         primary = self._base_query(hints, duration_seconds, ov)
         flags = {f.lower() for f in primary.edition_flags}
 
+        last_auto_accept = False
+
         def _run(query: Query, provider: str, *, mb_mode: str = "smart") -> float:
+            nonlocal last_auto_accept
+            last_auto_accept = False
             cands = self._search(gathered, provider, query, mb_mode=mb_mode)
             gathered.attempts.append(_Attempt(query=query, candidates=cands, provider=provider))
+            if not cands:
+                return 0.0
             try:
-                return evaluate_candidates(query, cands, self.config).score if cands else 0.0
+                outcome = evaluate_candidates(query, cands, self.config)
             except Exception as exc:
                 label = _provider_label(provider)
                 gathered.warnings.append(f"Ranking failed for {label} results: {exc}")
                 return 0.0
+            last_auto_accept = outcome.decision == MatchDecision.AUTO_ACCEPT
+            return outcome.score
 
         best = _run(primary, "musicbrainz")
+        primary_auto_accept = last_auto_accept
+        # Drop a soft flag when a returned recording's own base title already contains the
+        # whole phrase ("We Live in Brooklyn, Baby"): the words are the song's name, not a
+        # request for a live version. "Song (Live at Wembley)" keeps the flag, since its
+        # base title is only "Song".
+        if primary.soft_flags and gathered.attempts:
+            full_title = normalize_text(primary.title)
+            first = gathered.attempts[0]
+            if any(
+                normalize_text(strip_qualifiers(c.title)) == full_title for c in first.candidates
+            ):
+                primary = replace(
+                    primary,
+                    edition_flags=primary.edition_flags - primary.soft_flags,
+                    soft_flags=frozenset(),
+                )
+                flags = {f.lower() for f in primary.edition_flags}
+                gathered.attempts[0] = _Attempt(
+                    query=primary, candidates=first.candidates, provider=first.provider
+                )
+                try:
+                    outcome = evaluate_candidates(primary, first.candidates, self.config)
+                    best = outcome.score
+                    primary_auto_accept = outcome.decision == MatchDecision.AUTO_ACCEPT
+                except Exception as exc:
+                    gathered.warnings.append(f"Ranking failed for MusicBrainz results: {exc}")
         # If a strict album-filtered MB query returned candidates (so search_recordings did
         # not fall back internally) yet missed a single-only or EP-only release, broaden once
-        # to all official recordings before giving up on MusicBrainz.
+        # to all official recordings before giving up on MusicBrainz. Broaden on the decision,
+        # not just the score: a high-scoring match blocked as an unrequested live or other
+        # variant recording must still look for the studio recording.
         primary_had_hits = bool(gathered.attempts and gathered.attempts[0].candidates)
+        hard_live = "live" in flags and "live" not in primary.soft_flags
         if (
             primary.artist
             and primary_had_hits
-            and "live" not in flags
+            and not hard_live
             and "remix" not in flags
-            and (best < self.config.auto_accept_score or self.record_all)
+            and (best < self.config.auto_accept_score or not primary_auto_accept or self.record_all)
         ):
             best = max(best, _run(primary, "musicbrainz", mb_mode="broad"))
+            primary_auto_accept = primary_auto_accept or last_auto_accept
+
+        # CJK titles often differ only in punctuation (a full-width comma in the original
+        # title but not in the filename), which quoted phrase searches cannot bridge.
+        # Without a confident match, retry once with an unquoted term search.
+        if (
+            primary.artist
+            and _HAS_CJK_RE.search(primary.title)
+            and not primary_auto_accept
+            and not self.record_all
+        ):
+            best = max(best, _run(primary, "musicbrainz", mb_mode="terms"))
 
         pinned = bool(ov.artist or ov.title)
+        # An "English {原文}" artist is afv's own artist format, never a swapped title.
+        bilingual_artist = split_bilingual(hints.artist) is not None
         for pair in (hints.swapped_candidate, hints.original_embedded_pair):
             if pair is None or pinned:
+                continue
+            if bilingual_artist and pair is hints.swapped_candidate:
                 continue
             if best >= RETRY_BELOW_SCORE and not self.record_all:
                 continue

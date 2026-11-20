@@ -324,3 +324,28 @@ def test_bilingual_and_script_detection() -> None:
     assert format_bilingual("Jacky Cheung", "張學友") == "Jacky Cheung {張學友}"
     assert format_bilingual("Jacky Cheung", "Jacky Cheung {張學友}") == "Jacky Cheung {張學友}"
     assert format_bilingual(None, "張學友") == "張學友"
+
+
+def test_bilingual_split_trim_simplified_and_folder_grouping() -> None:
+    from audio_from_video.formatting import (
+        folder_grouping_key,
+        split_bilingual,
+        to_simplified_chinese,
+        trim_bilingual_context,
+    )
+
+    assert split_bilingual("Zhao Chuan {趙傳}") == ("Zhao Chuan", "趙傳")
+    assert split_bilingual("{吻別}") == (None, "吻別")
+    assert split_bilingual("Daft Punk") is None
+    assert split_bilingual("Song {Acoustic}") is None
+    assert split_bilingual("Artist {UK}") is None
+    assert trim_bilingual_context("Song {Live} at Wembley") == "Song {Live} at Wembley"
+    assert trim_bilingual_context("Love {愛} in the Rain") == "Love {愛} in the Rain"
+    assert trim_bilingual_context("Song {歌} at Wembley") == "Song {歌}"
+    assert trim_bilingual_context(
+        "Hai Kuo Tian Kong {海阔天空} at I Am A Singer 3 {我是歌手 3}"
+    ) == ("Hai Kuo Tian Kong {海阔天空}")
+    assert trim_bilingual_context("Song {歌} (Live)") == "Song {歌} (Live)"
+    assert to_simplified_chinese("我是一隻小小鳥 Daft Punk") == "我是一只小小鸟 Daft Punk"
+    assert to_simplified_chinese("Beyoncé") == "Beyoncé"
+    assert folder_grouping_key("Zhao Chuan {赵传}") == folder_grouping_key("zhao chuan {趙傳}")

@@ -87,7 +87,11 @@ def test_normalize_text_quotes_dashes_ellipsis_and_punctuation() -> None:
     assert normalize_text("AC/DC") == "ac dc"
     assert normalize_text("Simon & Garfunkel") == "simon and garfunkel"
     assert normalize_text("Beyoncé") == "beyonce"
-    assert normalize_text("吻別!") == "吻別"
+    # Traditional and Simplified Chinese compare equal (normalized to Simplified).
+    assert normalize_text("吻別!") == "吻别"
+    assert normalize_text("我是一隻小小鳥") == normalize_text("我是一只小小鸟")
+    # Punctuation inside CJK text does not split it into separate words.
+    assert normalize_text("我很醜\uff0c可是我很溫柔") == normalize_text("我很醜可是我很溫柔")
     assert normalize_text(None) == ""
 
 
@@ -925,3 +929,172 @@ def test_same_script_substring_edition_title_is_not_penalized() -> None:
     us_reissue = rel("rel-1991", title="Cheap Trick at Budokan", date="1991-01-01", country="US")
     chosen = choose_edition(cand(album="Cheap Trick at Budokan", releases=[jp_orig, us_reissue]))
     assert chosen.release_id == "rel-1978"
+
+
+def test_unrequested_live_recording_never_auto_accepts() -> None:
+    """Live-run regression: 'Dreams (2004 Remaster)' must not auto-accept a live recording."""
+    query = Query(
+        title="Dreams",
+        artist="Fleetwood Mac",
+        duration_seconds=257,
+        edition_flags=frozenset({"remaster"}),
+        raw_title="Dreams (2004 Remaster)",
+    )
+    live_title = cand(
+        "Dreams (live at Wembley, 6/20/80)",
+        "Fleetwood Mac",
+        album="Tusk",
+        rg="rg-tusk",
+        duration=254,
+    )
+    live_album = cand(
+        "Dreams",
+        "Fleetwood Mac",
+        album="Live in Boston",
+        rg="rg-boston",
+        secondary=["Live"],
+        duration=257,
+    )
+    for only in (live_title, live_album):
+        outcome = evaluate_candidates(query, [only], CFG)
+        assert outcome.decision != MatchDecision.AUTO_ACCEPT
+
+    # An explicitly requested live version may still auto-accept.
+    live_query = Query(
+        title="Dreams",
+        artist="Fleetwood Mac",
+        duration_seconds=257,
+        edition_flags=frozenset({"live"}),
+        raw_title="Dreams (Live)",
+    )
+    assert evaluate_candidates(live_query, [live_album], CFG).decision == (
+        MatchDecision.AUTO_ACCEPT
+    )
+
+    # With the studio recording present, it wins and auto-accepts.
+    studio = cand("Dreams", "Fleetwood Mac", album="Rumours", rg="rg-rumours", duration=257)
+    outcome = evaluate_candidates(query, [live_title, live_album, studio], CFG)
+    assert outcome.best is not None and outcome.best.album == "Rumours"
+    assert outcome.decision == MatchDecision.AUTO_ACCEPT
+
+
+def test_various_artists_compilation_and_contradicted_unknown_duration_never_auto_accept() -> None:
+    """Real-world regressions L1 and L2 (Chinese compilations beating the original album)."""
+    query = Query(title="我很醜可是我很溫柔", artist="趙傳", duration_seconds=235)
+    va = cand("我很醜可是我很溫柔", "趙傳", album="10年朋友6", rg="rg-va", duration=231)
+    va.album_artist = "Various Artists"
+    va.secondary_types = ["Compilation"]
+    assert evaluate_candidates(query, [va], CFG).decision != MatchDecision.AUTO_ACCEPT
+
+    original = cand(
+        "我很醜\uff0c可是我很溫柔",
+        "趙傳",
+        album="我很醜\uff0c可是我很溫柔",
+        rg="rg-orig",
+        duration=235,
+    )
+    original.album_artist = "趙傳"
+    outcome = evaluate_candidates(query, [va, original], CFG)
+    assert outcome.best is not None and outcome.best.release_group_id == "rg-orig"
+    assert outcome.decision == MatchDecision.AUTO_ACCEPT
+
+    # A 133 s clip vs. a box-set recording with no length, while timed recordings are 280 s.
+    clip = Query(title="我是一只小小鸟", artist="赵传", duration_seconds=133)
+    untimed = cand("我是一只小小鸟", "赵传", album="东方之珠", rg="rg-box", duration=None)
+    timed = cand("我是一隻小小鳥", "赵传", album="我是一隻小小鳥", rg="rg-orig2", duration=280)
+    assert evaluate_candidates(clip, [untimed, timed], CFG).decision != MatchDecision.AUTO_ACCEPT
+
+
+def test_requested_acoustic_instrumental_or_demo_version_wins_or_prompts() -> None:
+    """Review regression: '(Acoustic)', '(Instrumental)', or '(Demo)' never gets the studio cut."""
+    studio = cand("Dreams", "Fleetwood Mac", album="Rumours", rg="rg-rumours", duration=257)
+    for qualifier, length in (("Acoustic", 240), ("Instrumental", 250), ("Demo", 230)):
+        variant = cand(
+            f"Dreams ({qualifier})",
+            "Fleetwood Mac",
+            album=f"{qualifier} Sessions",
+            rg=f"rg-{qualifier.lower()}",
+            duration=length,
+        )
+        query = Query(
+            title="Dreams",
+            artist="Fleetwood Mac",
+            duration_seconds=length,
+            raw_title=f"Dreams ({qualifier})",
+            edition_flags=frozenset({qualifier.lower()}) - {"demo"},
+        )
+        outcome = evaluate_candidates(query, [studio, variant], CFG)
+        assert outcome.best is not None
+        assert outcome.best.release_group_id == f"rg-{qualifier.lower()}", qualifier
+
+        # With no matching version at all, the studio recording is never auto-accepted.
+        only_studio = evaluate_candidates(query, [studio], CFG)
+        assert only_studio.decision != MatchDecision.AUTO_ACCEPT, qualifier
+
+    # A plain request still gets the studio recording.
+    plain = Query(title="Dreams", artist="Fleetwood Mac", duration_seconds=257)
+    acoustic = cand("Dreams (Acoustic)", "Fleetwood Mac", album="X", rg="rg-x", duration=257)
+    outcome = evaluate_candidates(plain, [studio, acoustic], CFG)
+    assert outcome.best is not None and outcome.best.release_group_id == "rg-rumours"
+    assert outcome.decision == MatchDecision.AUTO_ACCEPT
+
+
+def test_requested_variant_prefers_exact_length_and_album_or_live_recognition() -> None:
+    """Review regressions: exact-length versions win, and album or live context counts."""
+    query = Query(
+        title="Dreams",
+        artist="Fleetwood Mac",
+        duration_seconds=240,
+        raw_title="Dreams (Acoustic)",
+        edition_flags=frozenset({"acoustic"}),
+    )
+    single = cand(
+        "Dreams (Acoustic)",
+        "Fleetwood Mac",
+        album="Dreams (Acoustic)",
+        rg="rg-single",
+        primary="Single",
+        duration=240,
+        date="2021-01-01",
+    )
+    for album_length in (270, 280):
+        album = cand(
+            "Dreams (Acoustic)",
+            "Fleetwood Mac",
+            album="Acoustic Collection",
+            rg="rg-album",
+            duration=album_length,
+            date="2010-01-01",
+        )
+        outcome = evaluate_candidates(query, [single, album], CFG)
+        assert outcome.best is not None and outcome.best.release_group_id == "rg-single"
+        assert outcome.decision == MatchDecision.AUTO_ACCEPT, album_length
+
+    # A plainly titled track on an acoustic album counts as the acoustic version.
+    studio = cand("Dreams", "Fleetwood Mac", album="Rumours", rg="rg-rumours", duration=257)
+    sessions = cand(
+        "Dreams", "Fleetwood Mac", album="The Acoustic Sessions", rg="rg-sessions", duration=240
+    )
+    outcome = evaluate_candidates(query, [studio, sessions], CFG)
+    assert outcome.best is not None and outcome.best.release_group_id == "rg-sessions"
+    assert outcome.decision == MatchDecision.AUTO_ACCEPT
+
+    # "(Live Acoustic)": a live recording satisfies the acoustic request.
+    live_acoustic = Query(
+        title="Dreams",
+        artist="Fleetwood Mac",
+        duration_seconds=240,
+        raw_title="Dreams (Live Acoustic)",
+        edition_flags=frozenset({"live", "acoustic"}),
+    )
+    live = cand(
+        "Dreams (Live)",
+        "Fleetwood Mac",
+        album="Live in Boston",
+        rg="rg-live",
+        secondary=["Live"],
+        duration=240,
+    )
+    outcome = evaluate_candidates(live_acoustic, [studio, live], CFG)
+    assert outcome.best is not None and outcome.best.release_group_id == "rg-live"
+    assert outcome.decision == MatchDecision.AUTO_ACCEPT

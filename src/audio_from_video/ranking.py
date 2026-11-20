@@ -14,7 +14,7 @@ from dataclasses import dataclass, field, replace
 from rapidfuzz import fuzz
 
 from audio_from_video.config import MatchingConfig
-from audio_from_video.formatting import has_non_latin
+from audio_from_video.formatting import has_non_latin, to_simplified_chinese
 from audio_from_video.models import Candidate, MatchDecision, ReleaseRef
 from audio_from_video.parser import is_edition_suffix
 
@@ -66,6 +66,9 @@ _QUOTE_MAP = str.maketrans(
     }
 )
 _WS_RE = re.compile(r"\s+")
+_CJK_CHARS = r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af"
+_CJK_GAP_RE = re.compile(rf"(?<=[{_CJK_CHARS}])\s+(?=[{_CJK_CHARS}])")
+_HAS_CJK_RE = re.compile(rf"[{_CJK_CHARS}]")
 _BRACKET_RE = re.compile(
     r"\s*[\(\[\uff08\u3010\uff3b][^\)\]\uff09\u3011\uff3d]*[\)\]\uff09\u3011\uff3d]"
 )
@@ -209,8 +212,12 @@ class Query:
     artist: str | None = None
     artist_aliases: tuple[str, ...] = ()
     album_hint: str | None = None
+    # True when album_hint came from a parent folder name (not --album or a trusted tag).
+    album_hint_from_folder: bool = False
     duration_seconds: float | None = None
     edition_flags: frozenset[str] = frozenset()
+    # Flags from a bare trailing phrase that may be part of the real title.
+    soft_flags: frozenset[str] = frozenset()
     markers: frozenset[str] = frozenset()
     qualifier_markers: frozenset[str] = frozenset()
     preferred_release_group_ids: frozenset[str] = frozenset()
@@ -249,6 +256,8 @@ def normalize_text(text: str | None) -> str:
     if not text:
         return ""
     s = unicodedata.normalize("NFKC", text).translate(_QUOTE_MAP).casefold()
+    # Compare Traditional and Simplified Chinese as equal (我是一隻小小鳥 == 我是一只小小鸟).
+    s = to_simplified_chinese(s)
     s = s.replace("&", " and ")
     if not has_non_latin(s):
         s = "".join(
@@ -260,7 +269,10 @@ def normalize_text(text: str | None) -> str:
             continue
         cat = unicodedata.category(ch)
         out.append(" " if cat[0] in ("P", "S") else ch)
-    return _WS_RE.sub(" ", "".join(out)).strip()
+    s = _WS_RE.sub(" ", "".join(out)).strip()
+    # CJK text has no word spaces, so punctuation turned into spaces (such as a full-width
+    # comma inside a Chinese title) must not split it: drop spaces between CJK characters.
+    return _CJK_GAP_RE.sub("", s)
 
 
 def extract_qualifiers(title: str | None) -> list[str]:
@@ -851,14 +863,71 @@ def release_group_sort_key(query: Query, candidate: Candidate) -> tuple[object, 
     )
 
 
+def _requested_variant_flags(query: Query) -> frozenset[str]:
+    """Acoustic, instrumental, or demo versions the file explicitly asks for."""
+    return frozenset(_allowed_qualifier_flags(query) & _REQUESTABLE_VARIANT_FLAGS)
+
+
+_ALBUM_VARIANT_RES: dict[str, re.Pattern[str]] = {
+    "acoustic": re.compile(r"\b(?:acoustic|unplugged)\b", re.IGNORECASE),
+    "instrumental": re.compile(r"\binstrumentals?\b", re.IGNORECASE),
+    "demo": re.compile(r"\bdemos?\b", re.IGNORECASE),
+}
+
+
+def _variant_length_bucket(query: Query, candidate: Candidate) -> int:
+    """Length distance in 15 s buckets (unknown lengths sort last)."""
+    if query.duration_seconds is None or candidate.duration_seconds is None:
+        return 9999
+    return int(abs(query.duration_seconds - candidate.duration_seconds) // 15.0)
+
+
+def _satisfies_requested_variant(
+    query: Query, candidate: Candidate, requested: frozenset[str]
+) -> bool:
+    """True when the candidate is plausibly the requested acoustic, instrumental, or demo
+    version: the word is in its title or album title ("Dreams" on *The Acoustic Sessions*),
+    or, for a requested live acoustic version, it is a live recording."""
+    if qualifier_flags(candidate.title) & requested:
+        return True
+    album = candidate.album or ""
+    if any(_ALBUM_VARIANT_RES[flag].search(album) for flag in requested):
+        return True
+    if "acoustic" in requested and "live" in _allowed_qualifier_flags(query):
+        secondary = {s.lower() for s in candidate.secondary_types}
+        return "live" in secondary or "live" in qualifier_flags(candidate.title)
+    return False
+
+
 def choose_release_group(query: Query, candidates: Sequence[Candidate]) -> Candidate:
     """Choose a release group: audio over video, preferred or folder match, type, then date."""
     audio_candidates = [c for c in candidates if not c.is_video]
     active = audio_candidates or list(candidates)
     top = max(c.score for c in active)
     pool = [c for c in active if c.score >= top - RELEASE_GROUP_POOL_WINDOW]
+    # A file asking for an acoustic, instrumental, or demo version gets that recording when
+    # one is reasonably close (the wider window only decides whether such a version exists);
+    # among matching versions, the normal window keeps a far-off-length version from winning.
+    requested = _requested_variant_flags(query)
+    if requested:
+        variants = [
+            c
+            for c in active
+            if c.score >= top - REQUESTED_VARIANT_WINDOW
+            and _satisfies_requested_variant(query, c, requested)
+        ]
+        if variants:
+            variant_top = max(c.score for c in variants)
+            pool = [c for c in variants if c.score >= variant_top - RELEASE_GROUP_POOL_WINDOW]
+            # Requested versions are separate recordings, so length closeness (in coarse
+            # buckets, so small jitter keeps the album-first order) decides before type.
+            chosen = min(
+                pool,
+                key=lambda c: (_variant_length_bucket(query, c), release_group_sort_key(query, c)),
+            )
+            return choose_edition(chosen, disc_hint=query.disc_hint)
     explicit_edition = bool({"live", "remix"} & {f.lower() for f in query.edition_flags})
-    if not explicit_edition:
+    if not explicit_edition and not requested:
         allowed = _allowed_qualifier_flags(query)
         clean_pool = [c for c in pool if not (qualifier_flags(c.title) - allowed)]
         if clean_pool:
@@ -928,6 +997,64 @@ def _has_extreme_duration_excess(query: Query, best: Candidate) -> bool:
     return extra > max(EXTREME_DURATION_MIN_EXTRA, EXTREME_DURATION_RATIO * best.duration_seconds)
 
 
+_DIFFERENT_RECORDING_FLAGS = frozenset({"live", "acoustic", "instrumental", "demo", "remix"})
+_REQUESTABLE_VARIANT_FLAGS = frozenset({"acoustic", "instrumental", "demo"})
+REQUESTED_VARIANT_WINDOW = 0.25
+
+
+def _is_requested_variant_missing(query: Query, best: Candidate) -> bool:
+    """True when the file asks for an acoustic, instrumental, or demo version that the best
+    match is not (so the studio recording is never applied silently in its place)."""
+    requested = _requested_variant_flags(query)
+    return bool(requested) and not _satisfies_requested_variant(query, best, requested)
+
+
+UNKNOWN_DURATION_MIN_TOLERANCE = 30.0
+UNKNOWN_DURATION_RATIO_TOLERANCE = 0.25
+
+
+def _is_unrequested_various_artists(query: Query, best: Candidate) -> bool:
+    """True when the best match sits on a Various Artists compilation the file did not name.
+
+    A song's original release is almost never a Various Artists compilation, and such
+    compilations often store variant titles that win exact-title ties (L2: *10年朋友6*).
+    """
+    if not query.artist or not best.album_artist:
+        return False
+    if normalize_text(best.album_artist) not in _VARIOUS_ARTISTS:
+        return False
+    if normalize_text(query.artist) in _VARIOUS_ARTISTS:
+        return False
+    return not _albums_match(query.album_hint, best.album)
+
+
+def _is_unknown_duration_contradicted(
+    query: Query, best: Candidate, peers: Iterable[Candidate]
+) -> bool:
+    """True when the best match has no length, while every timed recording of the same
+    song disagrees with the file by a wide margin (e.g., a 133 s clip vs. 280 s recordings).
+    """
+    if best.duration_seconds is not None or not query.duration_seconds:
+        return False
+    known = [c.duration_seconds for c in peers if c.duration_seconds]
+    if not known:
+        return False
+    tolerance = max(
+        UNKNOWN_DURATION_MIN_TOLERANCE, UNKNOWN_DURATION_RATIO_TOLERANCE * query.duration_seconds
+    )
+    return all(abs(d - query.duration_seconds) > tolerance for d in known)
+
+
+def _is_unrequested_different_recording(query: Query, best: Candidate) -> bool:
+    """True when the best match is a live, acoustic, instrumental, demo, or remix recording
+    (or comes from a live album) that the query did not ask for."""
+    allowed = _allowed_qualifier_flags(query)
+    if (qualifier_flags(best.title) & _DIFFERENT_RECORDING_FLAGS) - allowed:
+        return True
+    secondary = {s.lower() for s in best.secondary_types}
+    return "live" in secondary and "live" not in allowed
+
+
 def classify(
     score: float,
     margin: float,
@@ -969,6 +1096,10 @@ def evaluate_candidates(
         or _has_blocking_marker(query, best)
         or _has_unrecognized_qualifier(query, best)
         or _has_extreme_duration_excess(query, best)
+        or _is_unrequested_different_recording(query, best)
+        or _is_requested_variant_missing(query, best)
+        or _is_unrequested_various_artists(query, best)
+        or _is_unknown_duration_contradicted(query, best, best_identity.candidates)
         or (
             bool(query.artist)
             and base_title_similarity(query.title, best.title) < MIN_AUTO_ACCEPT_TITLE_SIM

@@ -810,6 +810,51 @@ def test_record_script_aborts_on_provider_failure_without_writing_corpus(
     assert not ckpt.exists()
 
 
+def test_reuse_existing_never_refetches_after_seeds_are_added(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Adding a seed changes the seed-file hash; existing responses must still be reused."""
+    module = _load_script("record_eval_corpus")
+    seed_file = tmp_path / "eval_seed_tuning.json"
+    seed_file.write_text(json.dumps(SYNTH_SEEDS), encoding="utf-8")
+    monkeypatch.setenv("AFV_MB_CONTACT", "relay@duck.com")
+    kwargs = {"mb_interval": 0.0, "itunes_interval": 0.0, "max_retries": 0}
+    assert (
+        module.main(
+            ["--fixtures", str(tmp_path), "--split", "tuning"],
+            transport=_synthetic_router().transport,
+            sleep=lambda _s: None,
+            **kwargs,
+        )
+        == 0
+    )
+    out_gz = tmp_path / "eval_tuning.json.gz"
+    before = load_corpus(out_gz)["responses"]
+
+    # Add a seed whose lookups are all already recorded (same input as s1, new id).
+    extra = json.loads(json.dumps(SYNTH_SEEDS[0]))
+    extra["id"] = "s1-copy"
+    seed_file.write_text(json.dumps([*SYNTH_SEEDS, extra]), encoding="utf-8")
+
+    hits: list[str] = []
+
+    def _refuse(request: httpx.Request) -> httpx.Response:
+        hits.append(str(request.url))
+        return httpx.Response(503)
+
+    code = module.main(
+        ["--fixtures", str(tmp_path), "--split", "tuning", "--reuse-existing"],
+        transport=httpx.MockTransport(_refuse),
+        sleep=lambda _s: None,
+        **kwargs,
+    )
+    assert code == 0
+    assert hits == []  # Nothing re-fetched despite the changed seed-file hash.
+    after = load_corpus(out_gz)
+    assert [s["id"] for s in after["seeds"]][-1] == "s1-copy"
+    assert all(after["responses"][url] == resp for url, resp in before.items())
+
+
 def test_evaluate_treats_frozen_5xx_and_429_as_replay_misses() -> None:
     responses = _record(SYNTH_SEEDS)
     # Poison s3 (adversarial) with a frozen 503 and s1 (auto_accept) with a frozen 429.
