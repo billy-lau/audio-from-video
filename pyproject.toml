@@ -43,10 +43,19 @@ dev = [
     "pytest>=8.0,<10.0",
     "ruff>=0.8,<1.0",
 ]
+gui = [
+    "PySide6-Essentials>=6.12,<7",
+]
+test-gui = [
+    "pytest-qt>=4.5",
+]
 
 [project.scripts]
 afv = "audio_from_video.cli.main:main"
 audio-from-video = "audio_from_video.cli.main:main"
+
+[project.gui-scripts]
+afv-gui = "audio_from_video.gui.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audio_from_video"]
@@ -66,3 +75,6 @@ ignore = ["B008"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra"]
+markers = [
+    "gui: Qt desktop GUI tests requiring PySide6 and pytest-qt",
+]

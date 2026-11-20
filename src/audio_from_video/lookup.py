@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from audio_from_video.cancel import CancelToken
 from audio_from_video.config import MatchingConfig
 from audio_from_video.formatting import (
     format_bilingual,
@@ -903,12 +904,15 @@ class TrackResolver:
         items: Sequence[BatchItem],
         *,
         on_progress: Callable[[int, int, str], None] | None = None,
+        cancel: CancelToken | None = None,
+        on_item_started: Callable[[int], None] | None = None,
     ) -> list[MatchResult]:
         """Two-pass batch resolution preferring each folder's dominant release group.
 
         Processes ungrouped tracks singly and each multi-track folder one group at a time
         so candidate lists are released immediately instead of accumulating across the batch.
         """
+        _ = cancel, on_item_started
         if not items:
             return []
         total = len(items)
