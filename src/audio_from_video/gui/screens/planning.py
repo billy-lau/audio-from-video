@@ -144,6 +144,27 @@ class PlanningScreen(QWidget):
         err_buttons.addWidget(self.open_log_button)
         err_buttons.addStretch(1)
         error_layout.addLayout(err_buttons)
+
+        # Dedicated feedback line so "Open log folder" failures never overwrite
+        # provider outage or offline warnings on self.notice_banner.
+        self.log_feedback_label = StatusLine(
+            "status_info",
+            "",
+            parent=self.error_frame,
+        )
+        set_accessible(
+            self.log_feedback_label,
+            "Log folder feedback",
+            "Status message shown if opening the application log folder fails.",
+        )
+        set_accessible(
+            self.log_feedback_label.text_label,
+            "Log folder feedback",
+            "Status message shown if opening the application log folder fails.",
+        )
+        self.log_feedback_label.setVisible(False)
+        error_layout.addWidget(self.log_feedback_label)
+
         self.error_frame.setVisible(False)
         layout.addWidget(self.error_frame)
 
@@ -205,6 +226,21 @@ class PlanningScreen(QWidget):
         else:
             self._expected_total = None
 
+    def _clear_log_feedback(self) -> None:
+        """Clear and hide the inline log-folder status message."""
+        self.log_feedback_label.set_status("status_info", "")
+        set_accessible(
+            self.log_feedback_label,
+            "Log folder feedback",
+            "Status message shown if opening the application log folder fails.",
+        )
+        set_accessible(
+            self.log_feedback_label.text_label,
+            "Log folder feedback",
+            "Status message shown if opening the application log folder fails.",
+        )
+        self.log_feedback_label.setVisible(False)
+
     def reset(self) -> None:
         """Reset indicators, notices, and error panel for a fresh planning run."""
         self._expected_total = None
@@ -222,6 +258,7 @@ class PlanningScreen(QWidget):
         self.progress_bar.setAccessibleDescription("Scanning folders.")
         self.stats_label.setText("Cache hits: 0 · MusicBrainz requests: 0")
         self.notice_banner.clear_message()
+        self._clear_log_feedback()
         self.error_details.clear()
         self.error_frame.setVisible(False)
         self.cancel_button.setEnabled(True)
@@ -231,6 +268,7 @@ class PlanningScreen(QWidget):
         heading = title.strip() or "Planning failed"
         self.error_header.set_status("status_error", heading)
         self.error_details.setPlainText(details)
+        self._clear_log_feedback()
         self.error_frame.setVisible(True)
 
     def _effective_total(self) -> int:
@@ -401,8 +439,9 @@ class PlanningScreen(QWidget):
                 if exists
                 else f"Log folder does not exist yet: {log_dir}."
             )
-            self.notice_banner.set_message(
-                "status_info",
-                text,
-                role_label="Log folder notice",
-            )
+            self.log_feedback_label.set_status("status_info", text)
+            set_accessible(self.log_feedback_label, "Log folder notice", text)
+            set_accessible(self.log_feedback_label.text_label, "Log folder notice", text)
+            self.log_feedback_label.setVisible(True)
+            return
+        self._clear_log_feedback()

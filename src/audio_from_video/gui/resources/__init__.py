@@ -21,6 +21,11 @@ from PySide6.QtGui import (
 )
 from PySide6.QtSvg import QSvgRenderer
 
+try:
+    from shiboken6 import isValid as _shiboken_is_valid
+except ImportError:  # pragma: no cover - shiboken6 is bundled with PySide6
+    _shiboken_is_valid = None
+
 AVAILABLE_ICONS: tuple[str, ...] = (
     "drop_zone",
     "file_add",
@@ -44,10 +49,23 @@ _FALLBACK_COLOR_HEX = "#374151"
 _MAX_RENDERER_CACHE = 128
 _MAX_PIXMAP_CACHE = 256
 
+# Icon loading, caching, and rendering are GUI-thread only (QPixmap, QIcon, and
+# QSvgRenderer must stay on the main Qt thread). The re-entrant lock protects cache
+# structures against nested re-entry during teardown, palette updates, and cloning.
 _CACHE_LOCK = threading.RLock()
 _RENDERER_CACHE: OrderedDict[tuple[str, str], QSvgRenderer] = OrderedDict()
 _PIXMAP_CACHE: OrderedDict[tuple[str, int, int, int, str, bool], QPixmap] = OrderedDict()
+# Strong references for engines returned by SvgIconEngine.clone() while Qt still
+# holds their C++ wrappers (PySide6 keeps Python ownership on cloned engines).
+_CLONED_ENGINES: list[SvgIconEngine] = []
 _POST_ROUTINE_REGISTERED = False
+
+
+def _prune_cloned_engines() -> None:
+    """Release tracked ``clone()`` wrappers whose C++ engines Qt has already deleted."""
+    if not _CLONED_ENGINES or _shiboken_is_valid is None:
+        return
+    _CLONED_ENGINES[:] = [engine for engine in _CLONED_ENGINES if _shiboken_is_valid(engine)]
 
 
 def _ensure_post_routine() -> None:
@@ -60,11 +78,12 @@ def _ensure_post_routine() -> None:
 
 
 def clear_icon_caches() -> None:
-    """Release cached ``QSvgRenderer`` and ``QPixmap`` objects."""
+    """Release cached ``QSvgRenderer`` and ``QPixmap`` objects and prune dead clones."""
     global _POST_ROUTINE_REGISTERED
     with _CACHE_LOCK:
         _PIXMAP_CACHE.clear()
         _RENDERER_CACHE.clear()
+        _prune_cloned_engines()
         _POST_ROUTINE_REGISTERED = False
 
 
@@ -281,12 +300,6 @@ class SvgIconEngine(QIconEngine):
         apply_fade = mode == QIcon.Mode.Disabled and self._fixed_color is not None
         return (color_hex, apply_fade)
 
-    def _svg_payload(self, mode: QIcon.Mode) -> bytes:
-        if not self._has_current_color:
-            return self._raw_svg
-        color_hex, _ = self._resolve_render_key(mode)
-        return self._raw_svg.replace(b"currentColor", color_hex.encode("ascii"))
-
     def paint(
         self,
         painter: QPainter,
@@ -370,8 +383,22 @@ class SvgIconEngine(QIconEngine):
         return self.scaledPixmap(size, mode, state, 1.0)
 
     def clone(self) -> QIconEngine:
-        """Return a deep copy of this icon engine."""
-        return SvgIconEngine(self._name, sizes=self._sizes, color=self._fixed_color)
+        """Return a deep copy of this icon engine kept alive while Qt owns it.
+
+        With PySide6/shiboken6, the Python wrapper returned by a virtual
+        ``QIconEngine::clone()`` override retains Python ownership and would be
+        garbage-collected immediately on return, leaving a detached ``QIcon``
+        with a dangling C++ pointer. Retaining the wrapper in ``_CLONED_ENGINES``
+        until Qt deletes its underlying C++ object avoids use-after-free crashes,
+        and dead entries are pruned automatically on subsequent clones and cache
+        cleanup.
+        """
+        cloned = SvgIconEngine(self._name, sizes=self._sizes, color=self._fixed_color)
+        with _CACHE_LOCK:
+            _ensure_post_routine()
+            _prune_cloned_engines()
+            _CLONED_ENGINES.append(cloned)
+        return cloned
 
 
 def render_svg_pixmap(

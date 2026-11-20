@@ -184,6 +184,9 @@ class SettingsScreen(QWidget):
         self._baseline_values: dict[str, object] = {}
         self._editable_config_issues: dict[str, str] = {}
         self._uneditable_config_issues: list[tuple[str, str]] = []
+        self._uneditable_field_labels: dict[str, str] = {}
+        self._env_override_issues: dict[str, tuple[str, str]] = {}
+        self._env_load_error_text: str | None = None
         self._raw_load_error_text: str | None = None
         self._loaded_from_raw_toml = False
         self._raw_validation_warning: str | None = None
@@ -724,9 +727,17 @@ class SettingsScreen(QWidget):
         """Return ``(key_label, detail)`` entries that cannot be edited in Settings."""
         return tuple(self._uneditable_config_issues)
 
+    @property
+    def invalid_env_overrides(self) -> dict[str, tuple[str, str]]:
+        """Return ``attr_path -> (env_var, error)`` for active invalid ``AFV_*`` overrides."""
+        return dict(self._env_override_issues)
+
     def _clear_invalid_field_labels(self) -> None:
         self._editable_config_issues.clear()
         self._uneditable_config_issues.clear()
+        self._uneditable_field_labels.clear()
+        self._env_override_issues.clear()
+        self._env_load_error_text = None
         self._raw_load_error_text = None
         for label in self.invalid_field_labels.values():
             label.set_status("status_warn", "")
@@ -813,6 +824,173 @@ class SettingsScreen(QWidget):
         )
         return f"{header} {action}"
 
+    def _collect_invalid_env_overrides(
+        self,
+        active_env: Mapping[str, str],
+        *,
+        probe_load_config: bool,
+    ) -> tuple[dict[str, tuple[str, str]], str | None]:
+        """Validate active ``AFV_*`` overrides without attributing failures to ``config.toml``."""
+        issues: dict[str, tuple[str, str]] = {}
+        raw_contact = active_env.get("AFV_MB_CONTACT", "").strip()
+        if raw_contact:
+            try:
+                validate_mb_contact(raw_contact)
+            except ConfigError as exc:
+                issues["musicbrainz.contact"] = ("AFV_MB_CONTACT", str(exc))
+        raw_ua = active_env.get("AFV_MB_USER_AGENT", "").strip()
+        if raw_ua:
+            try:
+                validate_mb_user_agent(raw_ua)
+            except ConfigError as exc:
+                issues["musicbrainz.user_agent_override"] = ("AFV_MB_USER_AGENT", str(exc))
+
+        extra_error: str | None = None
+        if probe_load_config and not issues and self._raw_load_error_text is None:
+            file_ok = True
+            if _path_exists(self._config_path):
+                try:
+                    load_config(config_path=self._config_path, env={})
+                except (ConfigError, OSError, UnicodeDecodeError):
+                    file_ok = False
+            if file_ok:
+                try:
+                    load_config(config_path=self._config_path, env=active_env)
+                except ConfigError as exc:
+                    extra_error = str(exc)
+                except (OSError, UnicodeDecodeError):
+                    extra_error = None
+        return issues, extra_error
+
+    def _compose_env_override_warning(
+        self,
+        filename: str,
+        *,
+        file_is_present: bool,
+        has_file_warning: bool,
+    ) -> str | None:
+        """Build a warning describing invalid ``AFV_*`` environment variable overrides."""
+        if self._env_override_issues:
+            env_vars = [var for var, _detail in self._env_override_issues.values()]
+            joined = _join_oxford(env_vars)
+            noun = "override" if len(env_vars) == 1 else "overrides"
+            details = " ".join(
+                detail.strip() for _var, detail in self._env_override_issues.values() if detail
+            )
+            if has_file_warning:
+                return (
+                    f"Also, the {joined} environment variable {noun} failed validation: "
+                    f"{details} Update or unset {joined} in your environment."
+                )
+            if file_is_present:
+                return (
+                    f"{filename} itself is valid, but the {joined} environment variable {noun} "
+                    f"failed validation: {details} "
+                    f"Update or unset {joined} in your environment instead of editing {filename}."
+                )
+            return (
+                f"Configuration failed validation due to the {joined} environment variable "
+                f"{noun}: {details} Update or unset {joined} in your environment."
+            )
+
+        if self._env_load_error_text:
+            detail = self._env_load_error_text.strip()
+            if has_file_warning:
+                return (
+                    "Also, an AFV_* environment variable override failed validation: "
+                    f"{detail} Update or unset it in your environment."
+                )
+            if file_is_present:
+                return (
+                    f"{filename} itself is valid, but an AFV_* environment variable override "
+                    f"failed validation: {detail} Update or unset it in your environment instead "
+                    f"of editing {filename}."
+                )
+            return (
+                "Configuration failed validation due to an AFV_* environment variable override: "
+                f"{detail} Update or unset it in your environment."
+            )
+        return None
+
+    def _compose_configuration_warning(self, filename: str) -> str | None:
+        """Combine raw ``config.toml`` warnings and ``AFV_*`` environment override warnings."""
+        file_warning = (
+            self._compose_raw_toml_warning(filename) if self._loaded_from_raw_toml else None
+        )
+        env_warning = self._compose_env_override_warning(
+            filename,
+            file_is_present=self._loaded_from_raw_toml,
+            has_file_warning=file_warning is not None,
+        )
+        if file_warning and env_warning:
+            return f"{file_warning} {env_warning}"
+        return file_warning or env_warning
+
+    def _is_owned_warning_banner(self, previous_warning: str | None) -> bool:
+        """Return True when ``status_banner`` holds a warning banner managed here."""
+        if previous_warning is None:
+            return False
+        current = self.status_banner.text
+        return current in (previous_warning, f"Preferences saved. {previous_warning}")
+
+    def _refresh_env_validation_state(
+        self,
+        active_env: Mapping[str, str],
+        *,
+        probe_load_config: bool,
+    ) -> None:
+        """Update inline warning badges and ``status_banner`` for ``AFV_*`` overrides."""
+        if self._config_load_blocked:
+            return
+        issues, extra_error = self._collect_invalid_env_overrides(
+            active_env,
+            probe_load_config=probe_load_config,
+        )
+        self._env_override_issues = issues
+        self._env_load_error_text = extra_error
+
+        for attr_path in ("musicbrainz.contact", "musicbrainz.user_agent_override"):
+            if attr_path in issues:
+                env_var, err = issues[attr_path]
+                self._set_invalid_field_label(
+                    attr_path,
+                    f"Invalid value from {env_var} environment variable: {err}",
+                )
+            elif attr_path in self._editable_config_issues:
+                self._set_invalid_field_label(attr_path, self._editable_config_issues[attr_path])
+            elif attr_path in self._uneditable_field_labels:
+                self._set_invalid_field_label(attr_path, self._uneditable_field_labels[attr_path])
+            else:
+                label = self.invalid_field_labels.get(attr_path)
+                if label is not None:
+                    label.set_status("status_warn", "")
+                    label.setVisible(False)
+
+        previous_warning = self._raw_validation_warning
+        refreshed = self._compose_configuration_warning(self._config_path.name)
+        is_saved_prefix = (
+            previous_warning is not None
+            and self.status_banner.text == f"Preferences saved. {previous_warning}"
+        )
+        banner_is_ours = self.status_banner.isHidden() or self._is_owned_warning_banner(
+            previous_warning
+        )
+        self._raw_validation_warning = refreshed
+        if refreshed is not None:
+            should_update = self.status_banner.isHidden() or (
+                refreshed != previous_warning
+                if is_saved_prefix
+                else self.status_banner.text != refreshed
+            )
+            if banner_is_ours and should_update:
+                self.status_banner.set_message(
+                    "status_warn",
+                    refreshed,
+                    role_label="Configuration warning",
+                )
+        elif self._is_owned_warning_banner(previous_warning):
+            self.status_banner.clear_message()
+
     def _populate_conflict_choices(self) -> None:
         self.conflict_combo.clear()
         self.conflict_combo.addItem("Skip existing", ConflictPolicy.SKIP.value)
@@ -880,12 +1058,16 @@ class SettingsScreen(QWidget):
     def _load_from_raw_toml(self, target_path: Path) -> None:
         """Populate widgets from raw ``config.toml`` when ``controller.config`` is ``None``."""
         defaults = AppConfig(config_path=target_path)
+        prev_warning = self._raw_validation_warning
+        prev_blocked = self._config_load_blocked
         self._apply_defaults_to_widgets(defaults)
         self._clear_invalid_field_labels()
         self._loaded_from_raw_toml = False
         self._raw_validation_warning = None
         self._config_load_blocked = False
         self.save_button.setEnabled(True)
+        if prev_blocked or self._is_owned_warning_banner(prev_warning):
+            self.status_banner.clear_message()
 
         try:
             raw_text = target_path.read_text(encoding="utf-8")
@@ -1119,10 +1301,16 @@ class SettingsScreen(QWidget):
                             validate_mb_user_agent(cleaned_ua)
                         except ConfigError as exc:
                             uneditable_issues.append(("[musicbrainz] user_agent", str(exc)))
+                            ua_msg = (
+                                "Invalid [musicbrainz] user_agent in "
+                                f"{target_path.name}; click Open config file to edit it manually."
+                            )
+                            self._uneditable_field_labels["musicbrainz.user_agent_override"] = (
+                                ua_msg
+                            )
                             self._set_invalid_field_label(
                                 "musicbrainz.user_agent_override",
-                                "Invalid [musicbrainz] user_agent in "
-                                f"{target_path.name}; click Open config file to edit it manually.",
+                                ua_msg,
                             )
                 elif raw_ua is not None:
                     uneditable_issues.append(
@@ -1131,10 +1319,14 @@ class SettingsScreen(QWidget):
                             "Config key 'musicbrainz.user_agent' must be a string.",
                         )
                     )
+                    ua_msg = (
+                        f"Invalid [musicbrainz] user_agent value ({raw_ua!r}) in "
+                        f"{target_path.name}; click Open config file to edit it manually."
+                    )
+                    self._uneditable_field_labels["musicbrainz.user_agent_override"] = ua_msg
                     self._set_invalid_field_label(
                         "musicbrainz.user_agent_override",
-                        f"Invalid [musicbrainz] user_agent value ({raw_ua!r}) in "
-                        f"{target_path.name}; click Open config file to edit it manually.",
+                        ua_msg,
                     )
 
         match_tbl = parsed.get("matching")
@@ -1167,17 +1359,10 @@ class SettingsScreen(QWidget):
         # Inspect load_config validation for the exact ConfigError text and any unexpected issues.
         try:
             load_config(config_path=target_path, env={})
-        except ConfigError as exc:
+        except (ConfigError, OSError, UnicodeDecodeError) as exc:
             self._raw_load_error_text = str(exc)
 
-        warning = self._compose_raw_toml_warning(target_path.name)
-        if warning:
-            self._raw_validation_warning = warning
-            self.status_banner.set_message(
-                "status_warn",
-                warning,
-                role_label="Configuration warning",
-            )
+        self._refresh_env_validation_state(os.environ, probe_load_config=True)
 
     def load_from_config(
         self,
@@ -1241,6 +1426,7 @@ class SettingsScreen(QWidget):
         if had_config_notice:
             self.status_banner.clear_message()
         self._apply_defaults_to_widgets(AppConfig(config_path=target_path))
+        self._refresh_env_validation_state(os.environ, probe_load_config=True)
 
     def _current_ui_preferences(self) -> tuple[str, bool]:
         level = self.log_level_combo.currentText().strip().upper()
@@ -1344,23 +1530,10 @@ class SettingsScreen(QWidget):
                 badge.set_status("status_info", f"Read-only: set by {env_var}")
                 badge.setVisible(True)
 
-        if self._loaded_from_raw_toml and not self._config_load_blocked:
-            refreshed = self._compose_raw_toml_warning(self._config_path.name)
-            if refreshed is not None and (
-                refreshed != self._raw_validation_warning
-                and (
-                    self.status_banner.isHidden()
-                    or self.status_banner.text == (self._raw_validation_warning or "")
-                )
-            ):
-                self._raw_validation_warning = refreshed
-                self.status_banner.set_message(
-                    "status_warn",
-                    refreshed,
-                    role_label="Configuration warning",
-                )
-            elif refreshed is not None:
-                self._raw_validation_warning = refreshed
+        self._refresh_env_validation_state(
+            active_env,
+            probe_load_config=self._controller.config is None,
+        )
 
     def overridden_settings(self) -> dict[str, str]:
         """Return mapping of ``AppConfig`` attribute paths currently overridden by env vars."""
