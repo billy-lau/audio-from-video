@@ -57,6 +57,66 @@ def _find_existing_conflict(output_root: Path, candidate: Path) -> Path | None:
     return find_case_insensitive_conflict(output_root, rel)
 
 
+class _OutputDirectories:
+    """Create output folders and remove the ones this run created if they end up empty.
+
+    Folders are reference-counted across worker threads, so a folder another item is still
+    using is never removed. Only folders below output_root that this run created are removed.
+    """
+
+    def __init__(self, output_root: Path) -> None:
+        self._output_root = output_root
+        self._lock = threading.Lock()
+        self._in_use: dict[Path, int] = {}
+        self._created: set[Path] = set()
+
+    def _chain(self, dest_dir: Path) -> list[Path]:
+        """dest_dir and its parents below output_root, deepest first."""
+        try:
+            dest_dir.relative_to(self._output_root)
+        except ValueError:
+            return [dest_dir]
+        chain: list[Path] = []
+        current = dest_dir
+        while current != self._output_root and current != current.parent:
+            chain.append(current)
+            current = current.parent
+        return chain
+
+    def acquire(self, dest_dir: Path) -> None:
+        with self._lock:
+            chain = self._chain(dest_dir)
+            missing = [path for path in chain if not path.exists()]
+            for path in chain:
+                self._in_use[path] = self._in_use.get(path, 0) + 1
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                self._release_locked(chain)
+                raise
+            self._created.update(missing)
+
+    def release(self, dest_dir: Path) -> None:
+        with self._lock:
+            self._release_locked(self._chain(dest_dir))
+
+    def _release_locked(self, chain: list[Path]) -> None:
+        for path in chain:
+            count = self._in_use.get(path, 0) - 1
+            if count > 0:
+                self._in_use[path] = count
+            else:
+                self._in_use.pop(path, None)
+        for path in chain:
+            if path not in self._created or path in self._in_use:
+                return
+            try:
+                path.rmdir()
+            except OSError:
+                return  # Not empty (a finished track or other files): keep it and its parents.
+            self._created.discard(path)
+
+
 def _next_available_rename_path(
     item: PlanItem,
     *,
@@ -103,6 +163,7 @@ def _execute_single_item(
     replace_lock: threading.Lock,
     artwork_fetcher: ArtworkFetcher | None = None,
     max_rel_utf16: int | None = None,
+    directories: _OutputDirectories | None = None,
 ) -> TrackResult:
     """Run extraction, artwork fetch, fresh ID3v2.3 tagging, verification, and atomic rename."""
     started = time.monotonic()
@@ -144,8 +205,12 @@ def _execute_single_item(
         max_rel_utf16 if max_rel_utf16 is not None else compute_relative_path_budget(output_root)[0]
     )
 
+    # A cancel must not leave empty Artist/Album folders for items that never started.
+    if registry.is_interrupted:
+        raise InterruptedError("Interrupted before creating the output folder.")
+    folders = directories if directories is not None else _OutputDirectories(output_root)
     try:
-        dest_dir.mkdir(parents=True, exist_ok=True)
+        folders.acquire(dest_dir)
     except OSError as exc:
         return TrackResult(
             item=item,
@@ -156,109 +221,116 @@ def _execute_single_item(
             elapsed_seconds=time.monotonic() - started,
         )
 
-    part_path = make_part_path(dest_dir)
-    registry.track_part(part_path)
-
     try:
-        norm_result = run_ffmpeg(
-            ffmpeg_path,
-            item.media_input.path,
-            part_path,
-            item.extraction,
-            registry=registry,
-            warnings_out=warnings,
-        )
+        part_path = make_part_path(dest_dir)
+        registry.track_part(part_path)
 
-        art_payload: bytes | None = None
-        art_source: str | None = None
-        if not no_artwork:
-            if item.artwork_bytes:
-                art_payload = item.artwork_bytes
-                art_source = "embedded"
-            elif artwork_fetcher is not None and item.candidate is not None:
-                if registry.is_interrupted:
-                    raise InterruptedError("Interrupted before artwork fetch.")
-                art_outcome = artwork_fetcher.fetch_for_candidate(item.candidate)
-                if art_outcome.data:
-                    art_payload = art_outcome.data
-                    art_source = art_outcome.source
-                if art_outcome.warning:
-                    warnings.append(art_outcome.warning)
+        try:
+            norm_result = run_ffmpeg(
+                ffmpeg_path,
+                item.media_input.path,
+                part_path,
+                item.extraction,
+                registry=registry,
+                warnings_out=warnings,
+            )
 
-        wrote_id3, tag_warnings = write_tags(part_path, item.metadata, artwork_bytes=art_payload)
-        warnings.extend(tag_warnings)
+            art_payload: bytes | None = None
+            art_source: str | None = None
+            if not no_artwork:
+                if item.artwork_bytes:
+                    art_payload = item.artwork_bytes
+                    art_source = "embedded"
+                elif artwork_fetcher is not None and item.candidate is not None:
+                    if registry.is_interrupted:
+                        raise InterruptedError("Interrupted before artwork fetch.")
+                    art_outcome = artwork_fetcher.fetch_for_candidate(item.candidate)
+                    if art_outcome.data:
+                        art_payload = art_outcome.data
+                        art_source = art_outcome.source
+                    if art_outcome.warning:
+                        warnings.append(art_outcome.warning)
 
-        verify_tagged_mp3(part_path, expect_id3=wrote_id3)
+            wrote_id3, tag_warnings = write_tags(
+                part_path, item.metadata, artwork_bytes=art_payload
+            )
+            warnings.extend(tag_warnings)
 
-        if registry.is_interrupted:
-            raise InterruptedError("Interrupted before atomic rename.")
+            verify_tagged_mp3(part_path, expect_id3=wrote_id3)
 
-        # Defensive NFC case-insensitive TOCTOU check immediately before atomic os.replace().
-        final_path = dest_path
-        with replace_lock:
-            existing_conflict = _find_existing_conflict(output_root, final_path)
-            if existing_conflict is not None:
-                if on_conflict == ConflictPolicy.SKIP:
-                    _unlink_quiet(part_path)
-                    registry.untrack_part(part_path)
-                    warnings.append(
-                        f"Destination appeared concurrently ({existing_conflict.name}); skipped."
-                    )
-                    return TrackResult(
-                        item=item,
-                        outcome=RunOutcome.SKIPPED,
-                        output_path=existing_conflict,
-                        warnings=warnings,
-                        elapsed_seconds=time.monotonic() - started,
-                        artwork_source=art_source,
-                        normalization=norm_result,
-                    )
-                if on_conflict == ConflictPolicy.RENAME:
-                    final_path = _next_available_rename_path(
-                        item,
-                        output_root=output_root,
-                        flat=flat,
-                        max_rel_utf16=rel_budget,
-                        preferred_parent=dest_path.parent,
-                    )
-                    final_path.parent.mkdir(parents=True, exist_ok=True)
-                elif on_conflict == ConflictPolicy.OVERWRITE:
-                    final_path = existing_conflict
-                    final_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(part_path, final_path)
+            if registry.is_interrupted:
+                raise InterruptedError("Interrupted before atomic rename.")
+
+            # Defensive NFC case-insensitive TOCTOU check immediately before atomic os.replace().
+            final_path = dest_path
+            with replace_lock:
+                existing_conflict = _find_existing_conflict(output_root, final_path)
+                if existing_conflict is not None:
+                    if on_conflict == ConflictPolicy.SKIP:
+                        _unlink_quiet(part_path)
+                        registry.untrack_part(part_path)
+                        warnings.append(
+                            f"Destination appeared concurrently ({existing_conflict.name}); "
+                            "skipped."
+                        )
+                        return TrackResult(
+                            item=item,
+                            outcome=RunOutcome.SKIPPED,
+                            output_path=existing_conflict,
+                            warnings=warnings,
+                            elapsed_seconds=time.monotonic() - started,
+                            artwork_source=art_source,
+                            normalization=norm_result,
+                        )
+                    if on_conflict == ConflictPolicy.RENAME:
+                        final_path = _next_available_rename_path(
+                            item,
+                            output_root=output_root,
+                            flat=flat,
+                            max_rel_utf16=rel_budget,
+                            preferred_parent=dest_path.parent,
+                        )
+                        final_path.parent.mkdir(parents=True, exist_ok=True)
+                    elif on_conflict == ConflictPolicy.OVERWRITE:
+                        final_path = existing_conflict
+                        final_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(part_path, final_path)
+                registry.untrack_part(part_path)
+
+            outcome = (
+                RunOutcome.UNMATCHED
+                if item.metadata.match_status == MatchStatus.UNMATCHED
+                else RunOutcome.SUCCEEDED
+            )
+            return TrackResult(
+                item=item,
+                outcome=outcome,
+                output_path=final_path,
+                warnings=warnings,
+                elapsed_seconds=time.monotonic() - started,
+                stream_copied=item.extraction.stream_copy,
+                artwork_source=art_source,
+                normalization=norm_result,
+            )
+        except InterruptedError:
+            _unlink_quiet(part_path)
             registry.untrack_part(part_path)
+            raise
+        except (ExtractionError, VerificationError, OSError, Exception) as exc:
+            _unlink_quiet(part_path)
+            registry.untrack_part(part_path)
+            logger.error("Failed %s: %s", item.media_input.path.name, exc)
+            return TrackResult(
+                item=item,
+                outcome=RunOutcome.FAILED,
+                output_path=dest_path,
+                warnings=warnings,
+                error=str(exc),
+                elapsed_seconds=time.monotonic() - started,
+            )
 
-        outcome = (
-            RunOutcome.UNMATCHED
-            if item.metadata.match_status == MatchStatus.UNMATCHED
-            else RunOutcome.SUCCEEDED
-        )
-        return TrackResult(
-            item=item,
-            outcome=outcome,
-            output_path=final_path,
-            warnings=warnings,
-            elapsed_seconds=time.monotonic() - started,
-            stream_copied=item.extraction.stream_copy,
-            artwork_source=art_source,
-            normalization=norm_result,
-        )
-    except InterruptedError:
-        _unlink_quiet(part_path)
-        registry.untrack_part(part_path)
-        raise
-    except (ExtractionError, VerificationError, OSError, Exception) as exc:
-        _unlink_quiet(part_path)
-        registry.untrack_part(part_path)
-        logger.error("Failed %s: %s", item.media_input.path.name, exc)
-        return TrackResult(
-            item=item,
-            outcome=RunOutcome.FAILED,
-            output_path=dest_path,
-            warnings=warnings,
-            error=str(exc),
-            elapsed_seconds=time.monotonic() - started,
-        )
+    finally:
+        folders.release(dest_dir)
 
 
 def execute_plan(
@@ -316,6 +388,7 @@ def execute_plan(
         "replace_lock": replace_lock,
         "artwork_fetcher": artwork_fetcher,
         "max_rel_utf16": rel_budget,
+        "directories": _OutputDirectories(output_root),
     }
 
     try:

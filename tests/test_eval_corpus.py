@@ -730,22 +730,76 @@ def test_frozen_holdout_meets_phase2_exit_gate() -> None:
 
 
 def test_record_script_exits_2_without_contact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    import importlib.util
-
-    script = Path(__file__).parent.parent / "scripts" / "record_eval_corpus.py"
-    spec = importlib.util.spec_from_file_location("record_eval_corpus", script)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    """Without a configured contact or --maintainer-contact, the real default is never used:
+    the script stops before any network access and writes nothing."""
+    module = _load_script("record_eval_corpus")
+    assert module.DEFAULT_MB_CONTACT  # The real maintainer default stays in place.
     monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
     monkeypatch.delenv("AFV_MB_USER_AGENT", raising=False)
     monkeypatch.setenv("AFV_CONFIG_PATH", str(tmp_path / "missing.toml"))
+    (tmp_path / "eval_seed_tuning.json").write_text(json.dumps(SYNTH_SEEDS), encoding="utf-8")
+    hits: list[str] = []
+
+    def _record_hit(request: httpx.Request) -> httpx.Response:
+        hits.append(str(request.url))
+        return httpx.Response(503)
+
     before = {p: file_sha256(p) for p in (TUNING_SEEDS, HOLDOUT_SEEDS)}
-    assert module.main(["--fixtures", str(tmp_path)]) == 2
+    code = module.main(
+        ["--fixtures", str(tmp_path), "--split", "tuning"],
+        transport=httpx.MockTransport(_record_hit),
+        sleep=lambda _s: None,
+    )
+    assert code == 2
+    assert hits == []
+    assert "--maintainer-contact" in capsys.readouterr().err
     assert {p: file_sha256(p) for p in before} == before
-    assert not list(tmp_path.glob("eval_*.json"))
+    assert not list(tmp_path.glob("eval_tuning*"))  # No corpus and no checkpoint.
+
+
+def test_record_script_uses_the_maintainer_contact_only_when_asked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_script("record_eval_corpus")
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    monkeypatch.delenv("AFV_MB_USER_AGENT", raising=False)
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(tmp_path / "missing.toml"))
+    user_agent, source = module.resolve_recording_user_agent(maintainer_contact=True)
+    assert module.DEFAULT_MB_CONTACT in user_agent
+    assert source == "maintainer default"
+    with pytest.raises(module.ConfigError, match="--maintainer-contact"):
+        module.resolve_recording_user_agent()
+    # An explicit contact always wins over the flag.
+    monkeypatch.setenv("AFV_MB_CONTACT", "relay@duck.com")
+    user_agent, source = module.resolve_recording_user_agent(maintainer_contact=True)
+    assert "relay@duck.com" in user_agent
+    assert module.DEFAULT_MB_CONTACT not in user_agent
+    assert source == "configured"
+
+
+def test_record_script_prints_the_contact_in_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    module = _load_script("record_eval_corpus")
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    monkeypatch.delenv("AFV_MB_USER_AGENT", raising=False)
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(tmp_path / "missing.toml"))
+    (tmp_path / "eval_seed_tuning.json").write_text(json.dumps(SYNTH_SEEDS), encoding="utf-8")
+    code = module.main(
+        ["--fixtures", str(tmp_path), "--split", "tuning", "--maintainer-contact"],
+        transport=_synthetic_router().transport,
+        mb_interval=0.0,
+        itunes_interval=0.0,
+        max_retries=0,
+        sleep=lambda _s: None,
+    )
+    assert code == 0
+    first_line = capsys.readouterr().out.splitlines()[0]
+    assert first_line.startswith("MusicBrainz User-Agent: ")
+    assert module.DEFAULT_MB_CONTACT in first_line
+    assert first_line.endswith("(maintainer default)")
 
 
 def _load_script(name: str):

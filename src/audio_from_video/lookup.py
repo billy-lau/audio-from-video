@@ -556,7 +556,10 @@ class TrackResolver:
         if primary.soft_flags and gathered.attempts:
             full_title = normalize_text(primary.title)
             first = gathered.attempts[0]
-            if any(
+            # Only when the flag words are part of the searched title itself; a stripped
+            # tail ("Song - Live" searched as "Song") keeps its request.
+            title_words = set(full_title.split())
+            if all(flag in title_words for flag in primary.soft_flags) and any(
                 normalize_text(strip_qualifiers(c.title)) == full_title for c in first.candidates
             ):
                 primary = replace(

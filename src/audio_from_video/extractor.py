@@ -20,6 +20,7 @@ from audio_from_video.models import (
     NormalizationResult,
     QualitySpec,
 )
+from audio_from_video.procutil import no_window_creationflags
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,7 @@ def detect_loudnorm_max_lra(ffmpeg_path: Path) -> float:
         completed = subprocess.run(
             [str(ffmpeg_path), "-nostdin", "-hide_banner", "-h", "filter=loudnorm"],
             stdin=subprocess.DEVNULL,
+            creationflags=no_window_creationflags(),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -459,6 +461,7 @@ def _run_tracked_ffmpeg(
         proc = subprocess.Popen(
             cmd,
             stdin=subprocess.DEVNULL,
+            creationflags=no_window_creationflags(),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )

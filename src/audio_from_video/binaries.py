@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from audio_from_video.config import AppConfig
+from audio_from_video.procutil import no_window_creationflags
 
 
 class MissingBinaryError(RuntimeError):
@@ -171,6 +172,7 @@ def get_binary_version(binary_path: Path) -> str | None:
         completed = subprocess.run(
             [str(binary_path), "-version"],
             stdin=subprocess.DEVNULL,
+            creationflags=no_window_creationflags(),
             capture_output=True,
             text=True,
             timeout=10,
@@ -190,6 +192,7 @@ def has_libmp3lame(ffmpeg_path: Path) -> bool:
         completed = subprocess.run(
             [str(ffmpeg_path), "-nostdin", "-hide_banner", "-encoders"],
             stdin=subprocess.DEVNULL,
+            creationflags=no_window_creationflags(),
             capture_output=True,
             text=True,
             timeout=10,

@@ -16,7 +16,7 @@ from rapidfuzz import fuzz
 from audio_from_video.config import MatchingConfig
 from audio_from_video.formatting import has_non_latin, to_simplified_chinese
 from audio_from_video.models import Candidate, MatchDecision, ReleaseRef
-from audio_from_video.parser import is_edition_suffix
+from audio_from_video.parser import _EDITION_TAIL_RE, is_edition_suffix
 
 W_TITLE = 0.45
 W_ARTIST = 0.35
@@ -1002,9 +1002,57 @@ _REQUESTABLE_VARIANT_FLAGS = frozenset({"acoustic", "instrumental", "demo"})
 REQUESTED_VARIANT_WINDOW = 0.25
 
 
+def _satisfies_requested_remix(query: Query, best: Candidate, best_flags: frozenset[str]) -> bool:
+    """True when the best match is a remix, or its qualifier names the same remixer as the
+    file ("Waves (Robin Schulz radio edit)" for "Waves (Robin Schulz Remix)")."""
+    if "remix" in best_flags:
+        return True
+    wanted = _remixer_name_tokens(query.raw_title or query.title)
+    return bool(wanted) and wanted <= _remixer_name_tokens(best.title)
+
+
+# Qualifier words that never name a remixer, so they never show a requested remix was met:
+# every word of the edition vocabulary (the benign qualifier and edition tail patterns, such
+# as "explicit", "clean", "bonus track", "deluxe edition", or "live"), plus a few video-title
+# words. Taking them from the patterns keeps one vocabulary instead of a second list.
+def _pattern_words(*patterns: re.Pattern[str]) -> frozenset[str]:
+    return frozenset(
+        word.lower()
+        for pattern in patterns
+        for word in re.findall(r"[A-Za-z]{3,}", pattern.pattern)
+    )
+
+
+_GENERIC_REMIX_WORDS = (
+    _pattern_words(_BENIGN_EDITION_QUALIFIER_RE, _EDITION_TAIL_RE)
+    | _REMIX_STOP_WORDS
+    | frozenset({"album", "single", "original", "remastered", "digital", "video", "dirty"})
+)
+_YEAR_TOKEN_RE = re.compile(r"^(?:19|20)\d{2}$")
+
+
+def _remixer_name_tokens(title: str) -> set[str]:
+    """Qualifier words that can be a remixer's name (no years or generic edition words)."""
+    return {
+        tok
+        for tok in _remix_qualifier_tokens(title)
+        if tok not in _GENERIC_REMIX_WORDS and not _YEAR_TOKEN_RE.match(tok)
+    }
+
+
 def _is_requested_variant_missing(query: Query, best: Candidate) -> bool:
-    """True when the file asks for an acoustic, instrumental, or demo version that the best
-    match is not (so the studio recording is never applied silently in its place)."""
+    """True when the file asks for a live, remix, acoustic, instrumental, or demo version
+    that the best match is not (so the studio recording is never applied silently in its
+    place). A soft flag dropped as part of the song's own name is no longer in edition_flags,
+    so "Live in the Moment" is not a request."""
+    requested_editions = {"live", "remix"} & {f.lower() for f in query.edition_flags}
+    best_flags = qualifier_flags(best.title)
+    if "live" in requested_editions:
+        secondary = {s.lower() for s in best.secondary_types}
+        if "live" not in secondary and "live" not in best_flags:
+            return True
+    if "remix" in requested_editions and not _satisfies_requested_remix(query, best, best_flags):
+        return True
     requested = _requested_variant_flags(query)
     return bool(requested) and not _satisfies_requested_variant(query, best, requested)
 

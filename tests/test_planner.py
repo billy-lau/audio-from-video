@@ -422,6 +422,88 @@ def test_runner_interrupt_returns_exit_code_130_and_leaves_no_part_files(
     assert list(output_root.rglob("*.part")) == []
 
 
+def test_cancel_leaves_no_empty_folders_for_queued_or_cancelled_items(
+    tmp_path: Path, ffprobe_path: Path, monkeypatch: object
+) -> None:
+    """GUI plan C6: items still queued after a cancel must not create Artist/Album folders."""
+    from audio_from_video import runner as runner_mod
+    from audio_from_video.extractor import ProcessRegistry
+
+    clips = [
+        make_video_with_audio(
+            tmp_path / f"0{n} {artist} - Song.mp4",
+            metadata={"artist": artist, "title": "Song", "album": f"{artist} Album"},
+        )
+        for n, artist in enumerate(("Alpha", "Bravo", "Charlie"), start=1)
+    ]
+    out = tmp_path / "out"
+    media_inputs, output_root = discover_inputs(clips, output_dir=out)
+    cfg = load_config(config_path=tmp_path / "missing.toml", env={})
+    plan = build_offline_plan(
+        media_inputs, output_root=output_root, ffprobe_path=ffprobe_path, config=cfg
+    )
+    assert all(item.output_path is not None for item in plan)
+    assert len({item.output_path.parent for item in plan if item.output_path}) == 3
+
+    registry = ProcessRegistry()
+    calls: list[Path] = []
+
+    def _cancel_during_first(_ffmpeg, _src, part_path, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+        calls.append(part_path)
+        assert part_path.parent.is_dir()  # The item's own folder exists while it runs.
+        registry.terminate_all(timeout=0.1)
+        raise InterruptedError("cancelled")
+
+    monkeypatch.setattr(runner_mod, "run_ffmpeg", _cancel_during_first)  # type: ignore[attr-defined]
+    # jobs=1 without --fail-fast submits every item up front, so two are still queued.
+    summary = execute_plan(
+        plan, ffmpeg_path=Path("ffmpeg"), output_root=output_root, jobs=1, registry=registry
+    )
+    assert summary.interrupted is True
+    assert len(calls) == 1  # Queued items never start.
+    assert list(output_root.rglob("*")) == []  # No empty Artist/Album folders and no parts.
+
+
+def test_failed_item_removes_only_the_empty_folders_it_created(
+    tmp_path: Path, ffmpeg_path: Path, ffprobe_path: Path, monkeypatch: object
+) -> None:
+    from audio_from_video import runner as runner_mod
+
+    real_run_ffmpeg = runner_mod.run_ffmpeg
+    clips = [
+        make_video_with_audio(
+            tmp_path / f"0{n} Artist - Song {n}.mp4",
+            metadata={"artist": "Artist", "title": f"Song {n}", "album": album, "track": str(n)},
+        )
+        for n, album in ((1, "Shared"), (2, "Shared"), (3, "Lonely"))
+    ]
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "keep.txt").write_text("user file")
+    media_inputs, output_root = discover_inputs(clips, output_dir=out)
+    cfg = load_config(config_path=tmp_path / "missing.toml", env={})
+    plan = build_offline_plan(
+        media_inputs, output_root=output_root, ffprobe_path=ffprobe_path, config=cfg
+    )
+
+    def _fail_song_2_and_3(ffmpeg, src, part_path, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if "Song 1" not in src.name:
+            raise runner_mod.ExtractionError("boom")
+        return real_run_ffmpeg(ffmpeg, src, part_path, *args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "run_ffmpeg", _fail_song_2_and_3)  # type: ignore[attr-defined]
+    summary = execute_plan(plan, ffmpeg_path=ffmpeg_path, output_root=output_root, jobs=2)
+    assert summary.count(RunOutcome.FAILED) == 2
+    assert summary.count(RunOutcome.SUCCEEDED) == 1
+    shared = plan[0].output_path.parent  # type: ignore[union-attr]
+    lonely = plan[2].output_path.parent  # type: ignore[union-attr]
+    assert [p.name for p in shared.iterdir()] == [plan[0].output_path.name]  # type: ignore[union-attr]
+    assert not lonely.exists()  # Empty folder of a failed item is removed.
+    assert lonely.parent.is_dir()  # The artist folder still holds the shared album.
+    assert (out / "keep.txt").read_text() == "user file"
+    assert list(output_root.rglob("*.part")) == []
+
+
 def test_runner_toctou_recheck_handles_concurrent_destination_creation(
     tmp_path: Path, ffmpeg_path: Path, ffprobe_path: Path, monkeypatch: object
 ) -> None:

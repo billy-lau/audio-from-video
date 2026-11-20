@@ -1632,3 +1632,394 @@ def test_soft_trailing_live_flag_is_dropped_when_it_is_part_of_the_title() -> No
     )
     assert "live" in hints.edition_flags
     assert result.best is not None and result.best.album == "Live Album"
+
+
+def test_title_that_begins_with_live_in_is_not_a_live_request() -> None:
+    """Review regression: 'Portugal. The Man - Live in the Moment' names a studio song."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    def _run(filename: str, studio_title: str, live_title: str, tags: dict[str, str]) -> tuple:
+        artist = filename.split(" - ")[0]
+        credits_ = credit((artist, "", "artist-x", artist))
+        studio = release("rel-studio", "Studio Album", "rg-studio", date="2017-01-01")
+        live = release("rel-live", "Live Album", "rg-live", secondary=("Live",), date="2019-01-01")
+        studio_rec = recording("rec-studio", studio_title, credits_, [studio], length_ms=246_000)
+        live_rec = recording("rec-live", live_title, credits_, [live], length_ms=250_000)
+        router = Router()
+        router.json(query_has("secondarytype:live"), search_payload(live_rec))
+        router.json(query_has("recording:"), search_payload(studio_rec, live_rec))
+        hints = parse_hints(
+            ProbeResult(
+                path=_Path(f"/x/{filename}"),
+                duration_seconds=246.0,
+                format_name=None,
+                container_tags=tags,
+            )
+        )
+        result = _resolver(router, with_itunes=False).resolve(hints, 246.0)
+        queries = [r.url.params.get("query", "") for r in router.log if "/recording/" in r.url.path]
+        return hints, result, queries
+
+    hints, result, queries = _run(
+        "Portugal. The Man - Live in the Moment.mp4",
+        "Live in the Moment",
+        "Live in the Moment",
+        {},
+    )
+    assert hints.soft_edition_flags == ["live"]
+    assert "secondarytype:live" not in queries[0]
+    assert result.best is not None and result.best.album == "Studio Album"
+    assert result.decision == MatchDecision.AUTO_ACCEPT
+
+    # A third dash segment is still a clear request for the live version.
+    hints, result, queries = _run(
+        "Artist - Song - Live in Boston.mp4", "Song", "Song (Live in Boston)", {}
+    )
+    assert hints.soft_edition_flags == []
+    assert "secondarytype:live" in queries[0]
+    assert result.best is not None and result.best.album == "Live Album"
+
+    # A title tag without the artist ("Song - Live") is song plus tail: a hard request.
+    hints, result, _queries = _run(
+        "clip.mp4", "Song", "Song (Live)", {"artist": "Artist", "title": "Song - Live"}
+    )
+    assert hints.soft_edition_flags == []
+    assert result.best is not None and result.best.album == "Live Album"
+
+    # With no artist tag the shape is unknown, so it is soft, but its stripped tail (searched
+    # as "Song") still keeps the live request.
+    hints, result, _queries = _run(
+        "Artist - x.mp4", "Song", "Song (Live)", {"title": "Song - Live"}
+    )
+    assert hints.soft_edition_flags == ["live"]
+    assert result.best is not None and result.best.album == "Live Album"
+
+
+def _fleetwood_dreams(
+    filename: str,
+    duration: float,
+    *,
+    tags: dict[str, str] | None = None,
+    live_title: str | None = None,
+    live_only_in_live_search: bool = False,
+) -> tuple:
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    credits_ = credit(("Fleetwood Mac", "", "artist-fm", "Fleetwood Mac"))
+    studio = release("rel-rumours", "Rumours", "rg-rumours", date="1977-02-04")
+    studio_rec = recording("rec-studio", "Dreams", credits_, [studio], length_ms=257_000)
+    general = [studio_rec]
+    live_hits = []
+    if live_title is not None:
+        live = release("rel-live", "Live", "rg-live", secondary=("Live",), date="1980-12-08")
+        live_rec = recording(
+            "rec-live", live_title, credits_, [live], length_ms=int(duration * 1000)
+        )
+        live_hits = [live_rec]
+        if not live_only_in_live_search:
+            general = [studio_rec, live_rec]
+    router = Router()
+    router.json(query_has("secondarytype:live"), search_payload(*live_hits))
+    router.json(query_has("recording:"), search_payload(*general))
+    hints = parse_hints(
+        ProbeResult(
+            path=_Path(f"/x/{filename}"),
+            duration_seconds=duration,
+            format_name=None,
+            container_tags=tags or {},
+        )
+    )
+    return hints, _resolver(router, with_itunes=False).resolve(hints, duration)
+
+
+def test_requested_live_or_remix_version_never_silently_becomes_the_studio_recording() -> None:
+    """Review regression: with no live or remix recording found, the file prompts."""
+    for filename, duration in (
+        ("Fleetwood Mac - Dreams (Live).mp4", 262.0),
+        ("Fleetwood Mac - Dreams (Live at Wembley).mp4", 340.0),
+        ("Fleetwood Mac - Dreams (Gigamesh Remix).mp4", 262.0),
+    ):
+        _hints, result = _fleetwood_dreams(filename, duration)
+        assert result.decision != MatchDecision.AUTO_ACCEPT, filename
+
+    # A live recording that exists is still auto-accepted.
+    _hints, result = _fleetwood_dreams(
+        "Fleetwood Mac - Dreams (Live).mp4", 262.0, live_title="Dreams (Live)"
+    )
+    assert result.best is not None and result.best.album == "Live"
+    assert result.decision == MatchDecision.AUTO_ACCEPT
+
+
+def test_title_tag_with_a_live_tail_runs_the_live_only_search() -> None:
+    """Review regression: a title tag has no artist, so 'Dreams - Live in Boston' asks for live."""
+    for title, duration in (
+        ("Dreams - Live in Boston", 300.0),
+        ("Dreams - Live in Boston", 262.0),
+        ("Dreams - Live", 262.0),
+    ):
+        hints, result = _fleetwood_dreams(
+            "clip.mp4",
+            duration,
+            tags={"artist": "Fleetwood Mac", "title": title},
+            live_title="Dreams (Live)",
+            live_only_in_live_search=True,
+        )
+        assert hints.soft_edition_flags == [], title
+        assert result.best is not None and result.best.album == "Live", title
+
+
+def test_track_number_dash_does_not_make_a_title_start_live_flag_hard() -> None:
+    """Review regression: '01 - Portugal. The Man - Live in the Moment' names a studio song."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    credits_ = credit(("Portugal. The Man", "", "artist-ptm", "Portugal. The Man"))
+    studio = release("rel-studio", "Woodstock", "rg-studio", date="2017-06-16")
+    live = release("rel-live", "Live Album", "rg-live", secondary=("Live",), date="2019-01-01")
+    studio_rec = recording(
+        "rec-studio", "Live in the Moment", credits_, [studio], length_ms=246_000
+    )
+    live_rec = recording("rec-live", "Live in the Moment", credits_, [live], length_ms=250_000)
+    for filename in (
+        "01 - Portugal. The Man - Live in the Moment.mp4",
+        "1-02 - Portugal. The Man - Live in the Moment.mp4",
+    ):
+        router = Router()
+        router.json(query_has("secondarytype:live"), search_payload(live_rec))
+        router.json(query_has("recording:"), search_payload(studio_rec, live_rec))
+        hints = parse_hints(
+            ProbeResult(path=_Path(f"/x/{filename}"), duration_seconds=246.0, format_name=None)
+        )
+        result = _resolver(router, with_itunes=False).resolve(hints, 246.0)
+        assert hints.soft_edition_flags == ["live"], filename
+        assert result.best is not None and result.best.album == "Woodstock", filename
+        assert result.decision == MatchDecision.AUTO_ACCEPT, filename
+
+
+def test_artist_prefixed_title_tag_is_split_when_the_song_starts_with_an_edition_word() -> None:
+    """Review regression: 'Oasis - Live Forever' is the song Live Forever, not 'Oasis' live."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    rows = (
+        ("Oasis", "Oasis - Live Forever (Official Video)", "Live Forever", 276.0),
+        (
+            "Portugal. The Man",
+            "Portugal. The Man - Live in the Moment (Official Video)",
+            "Live in the Moment",
+            246.0,
+        ),
+        ("Wild Nothing", "Wild Nothing - Live in Dreams", "Live in Dreams", 230.0),
+        ("Bad Company", "Bad Company - Live for the Music", "Live for the Music", 220.0),
+    )
+    for artist, title_tag, song, duration in rows:
+        credits_ = credit((artist, "", f"artist-{artist}", artist))
+        album = release(f"rel-{song}", f"{song} Album", f"rg-{song}", date="2000-01-01")
+        song_rec = recording(f"rec-{song}", song, credits_, [album], length_ms=int(duration * 1000))
+        # The self-titled song is what the old parse searched for (Bad Company row).
+        self_titled = recording(
+            "rec-self",
+            artist,
+            credits_,
+            [release("rel-self", artist, "rg-self")],
+            length_ms=int(duration * 1000),
+        )
+        router = Router()
+        router.json(query_has(f'recording:"{song}"'), search_payload(song_rec))
+        router.json(query_has(f'recording:"{artist}"'), search_payload(self_titled))
+        hints = parse_hints(
+            ProbeResult(
+                path=_Path("/x/clip.mp4"),
+                duration_seconds=duration,
+                format_name=None,
+                container_tags={"artist": artist, "title": title_tag},
+            )
+        )
+        result = _resolver(router, with_itunes=False).resolve(hints, duration)
+        queries = [r.url.params.get("query", "") for r in router.log if "/recording/" in r.url.path]
+        assert hints.title == song, title_tag
+        assert queries and f'recording:"{song}"' in queries[0], title_tag
+        assert result.best is not None and result.best.title == song, title_tag
+        assert result.decision == MatchDecision.AUTO_ACCEPT, title_tag
+
+    # A bare edition tail is split too, but the unsplit reading is kept as the retry.
+    hints = parse_hints(
+        ProbeResult(
+            path=_Path("/x/clip.mp4"),
+            duration_seconds=290.0,
+            format_name=None,
+            container_tags={"artist": "Bad Company", "title": "Bad Company - Live"},
+        )
+    )
+    assert hints.title == "Live"
+    assert hints.original_embedded_pair == ("Bad Company", "Bad Company - Live")
+    assert "live" in hints.edition_flags
+
+
+def test_requested_remix_is_met_by_the_same_remixers_radio_edit() -> None:
+    """Review regression: 'Waves (Robin Schulz radio edit)' is the requested remix."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    credits_ = credit(("Mr. Probz", "", "artist-probz", "Mr. Probz"))
+    single = release("rel-waves-rs", "Waves (Robin Schulz Remix)", "rg-waves-rs", date="2014-01-01")
+    rec = recording(
+        "rec-waves-rs", "Waves (Robin Schulz radio edit)", credits_, [single], length_ms=208_000
+    )
+    router = Router()
+    router.json(query_has("recording:"), search_payload(rec))
+    hints = parse_hints(
+        ProbeResult(
+            path=_Path("/x/Mr. Probz - Waves (Robin Schulz Remix).mp4"),
+            duration_seconds=208.0,
+            format_name=None,
+        )
+    )
+    result = _resolver(router, with_itunes=False).resolve(hints, 208.0)
+    assert result.best is not None and result.best.recording_id == "rec-waves-rs"
+    assert result.decision == MatchDecision.AUTO_ACCEPT
+
+    # A different remixer (or the studio recording alone) still prompts.
+    _hints, result = _fleetwood_dreams("Fleetwood Mac - Dreams (Gigamesh Remix).mp4", 262.0)
+    assert result.decision != MatchDecision.AUTO_ACCEPT
+
+
+def test_artist_prefixed_title_tag_is_split_when_the_song_is_a_year_or_edition_word() -> None:
+    """Review regression: 'Prince - 1999' is the song 1999, not Prince plus a year tail."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    for artist, song in (
+        ("The Smashing Pumpkins", "1979"),
+        ("Prince", "1999"),
+        ("Anne-Marie", "2002"),
+        ("Taylor Swift", "Clean"),
+        ("Pavement", "Stereo"),
+    ):
+        credits_ = credit((artist, "", f"artist-{artist}", artist))
+        album = release(f"rel-{song}", f"{song} Album", f"rg-{song}", date="1995-01-01")
+        song_rec = recording(f"rec-{song}", song, credits_, [album], length_ms=260_000)
+        router = Router()
+        router.json(query_has(f'recording:"{song}"'), search_payload(song_rec))
+        router.json(query_has("recording:"), search_payload())
+        hints = parse_hints(
+            ProbeResult(
+                path=_Path("/x/clip.mp4"),
+                duration_seconds=260.0,
+                format_name=None,
+                container_tags={"artist": artist, "title": f"{artist} - {song} (Official Video)"},
+            )
+        )
+        result = _resolver(router, with_itunes=False).resolve(hints, 260.0)
+        assert hints.title == song, artist
+        assert result.best is not None and result.best.title == song, artist
+        assert result.decision == MatchDecision.AUTO_ACCEPT, artist
+
+    # The unsplit reading is the retry: "Bad Company - Live" is the song Bad Company, live.
+    credits_ = credit(("Bad Company", "", "artist-bc", "Bad Company"))
+    studio = release("rel-bc", "Bad Company", "rg-bc", date="1974-06-26")
+    live = release("rel-bc-live", "Live in Albuquerque", "rg-bc-live", secondary=("Live",))
+    studio_rec = recording("rec-bc", "Bad Company", credits_, [studio], length_ms=290_000)
+    live_rec = recording("rec-bc-live", "Bad Company", credits_, [live], length_ms=300_000)
+    router = Router()
+    router.json(query_has('recording:"Live"'), search_payload())
+    router.json(query_has('recording:"Bad Company"'), search_payload(studio_rec, live_rec))
+    hints = parse_hints(
+        ProbeResult(
+            path=_Path("/x/clip.mp4"),
+            duration_seconds=300.0,
+            format_name=None,
+            container_tags={"artist": "Bad Company", "title": "Bad Company - Live"},
+        )
+    )
+    result = _resolver(router, with_itunes=False).resolve(hints, 300.0)
+    assert result.best is not None and result.best.recording_id == "rec-bc-live"
+
+
+def test_requested_remix_is_not_met_by_a_shared_year_or_generic_word() -> None:
+    """Review regression: only a remixer's name shows a requested remix was found."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    def _decision(filename: str, artist: str, mb_title: str) -> MatchDecision:
+        credits_ = credit((artist, "", f"artist-{artist}", artist))
+        rec = recording(
+            "rec-x", mb_title, credits_, [release("rel-x", "Album", "rg-x")], length_ms=208_000
+        )
+        router = Router()
+        router.json(query_has("recording:"), search_payload(rec))
+        hints = parse_hints(
+            ProbeResult(path=_Path(f"/x/{filename}"), duration_seconds=208.0, format_name=None)
+        )
+        return _resolver(router, with_itunes=False).resolve(hints, 208.0).decision
+
+    assert _decision("Artist - Song (2011 Remix).mp4", "Artist", "Song (2011 remaster)") != (
+        MatchDecision.AUTO_ACCEPT
+    )
+    assert _decision("Artist - Song (Album Remix).mp4", "Artist", "Song (album version)") != (
+        MatchDecision.AUTO_ACCEPT
+    )
+    assert (
+        _decision(
+            "Mr. Probz - Waves (Robin Schulz Remix).mp4",
+            "Mr. Probz",
+            "Waves (Robin Schulz radio edit)",
+        )
+        == MatchDecision.AUTO_ACCEPT
+    )
+    assert (
+        _decision("Artist - Song (DJ X Remix).mp4", "Artist", "Song (DJ X dub)")
+        == MatchDecision.AUTO_ACCEPT
+    )
+
+
+def test_requested_remix_is_not_met_by_any_shared_edition_word() -> None:
+    """Review regression: 'explicit', 'clean', 'video', or 'bonus' never names a remixer."""
+    from pathlib import Path as _Path
+
+    from audio_from_video.models import ProbeResult
+    from audio_from_video.parser import parse_hints
+
+    def _decision(filename: str, artist: str, mb_title: str) -> MatchDecision:
+        credits_ = credit((artist, "", f"artist-{artist}", artist))
+        album = release("rel-x", "Album", "rg-x")
+        rec = recording("rec-x", mb_title, credits_, [album], length_ms=208_000)
+        router = Router()
+        router.json(query_has("recording:"), search_payload(rec))
+        hints = parse_hints(
+            ProbeResult(path=_Path(f"/x/{filename}"), duration_seconds=208.0, format_name=None)
+        )
+        return _resolver(router, with_itunes=False).resolve(hints, 208.0).decision
+
+    for filename, mb_title in (
+        ("Artist - Song (Remix) [Explicit].mp4", "Song (explicit)"),
+        ("Artist - Song (Remix) (Clean).mp4", "Song (clean version)"),
+        ("Artist - Song (Video Remix).mp4", "Song (video version)"),
+        ("Artist - Song (Bonus Remix).mp4", "Song (bonus track)"),
+    ):
+        assert _decision(filename, "Artist", mb_title) != MatchDecision.AUTO_ACCEPT, filename
+
+    assert (
+        _decision(
+            "Mr. Probz - Waves (Robin Schulz Remix).mp4",
+            "Mr. Probz",
+            "Waves (Robin Schulz radio edit)",
+        )
+        == MatchDecision.AUTO_ACCEPT
+    )

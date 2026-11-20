@@ -903,5 +903,24 @@
       "disc_number": null
     },
     "notes": "A requested acoustic version must win over the studio Breakeven (2008, about 261 s); the acoustic recording (about 244 s) is on the EP The Acoustic Sessions 2 (2021)."
+  },
+  {
+    "id": "t-clear-31",
+    "category": "clear",
+    "input": {
+      "filename": "Portugal. The Man - Live in the Moment.mp4",
+      "parent_dirs": [],
+      "tags": {},
+      "duration_seconds": 245
+    },
+    "expected": {
+      "outcome": "auto_accept",
+      "artist": "Portugal. The Man",
+      "title": "Live in the Moment",
+      "album": "Woodstock",
+      "track_number": null,
+      "disc_number": null
+    },
+    "notes": "A song title that begins with 'Live in' is not a live request; the studio recording on Woodstock (2017) must win over any live recording."
   }
 ]

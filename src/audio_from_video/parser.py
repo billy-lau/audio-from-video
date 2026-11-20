@@ -43,6 +43,19 @@ _EDITION_TAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A bare edition tail: the edition word alone, with a year, or with version, edit, or mix
+# ("Live", "2011 Remaster", "Acoustic Version", or "Extended Mix"). Unlike _EDITION_TAIL_RE,
+# no other words may follow, so "Live Forever" or "Live in the Moment" is a song title.
+_BARE_EDITION_TAIL_RE = re.compile(
+    r"^(?:(?:19|20)\d{2}\s+)?(?:digital\s+)?"
+    r"(?:remaster(?:ed)?|live|remix|acoustic|instrumental|extended|demo|mono|stereo|"
+    r"radio\s+edit|single\s+version|album\s+version|bonus\s+track|deluxe(?:\s+edition)?|"
+    r"edit|mix|version|explicit|clean)"
+    r"(?:\s+(?:version|edit|mix))?(?:\s+(?:19|20)\d{2})?$"
+    r"|^(?:19|20)\d{2}$|^(?:part\s+\d+|pt\.?\s*\d+)$",
+    re.IGNORECASE,
+)
+
 # Bracketed noise commonly appended to video filenames (ASCII and full-width CJK brackets).
 _NOISE_BRACKET_RE = re.compile(
     r"[\(\[\uff08\u3010\uff3b]\s*(?:"
@@ -110,26 +123,74 @@ def _strip_trailing_noise(text: str) -> str:
     return cleaned
 
 
-def _edition_flag_sources(text: str) -> tuple[set[str], set[str]]:
+def _strip_track_prefix(text: str) -> str:
+    """Drop a leading disc/track number ("01 - ", "1-02 - ", or "01. ") so it never counts as
+    a dash segment."""
+    for pattern in (_DISC_TRACK_PREFIX_RE, _TRACK_PREFIX_RE):
+        match = pattern.match(text)
+        if match:
+            return match.group(3)
+    return text
+
+
+def _edition_flag_sources(text: str, *, title_only: bool = False) -> tuple[set[str], set[str]]:
     """Return (hard, soft) edition flags.
 
-    Hard flags come from brackets or clear edition dash tails. Soft flags come only from an
-    unbracketed trailing phrase, which may be part of the real title ("We Live in Brooklyn,
-    Baby" looks like "Song Live at Wembley").
+    Hard flags come from brackets or clear edition dash tails (third segment on, or second
+    on when text is a title without the artist). Soft flags come from an unbracketed trailing
+    phrase or a second dash segment, either of which may be part of the real title ("We Live
+    in Brooklyn, Baby" looks like "Song Live at Wembley").
     """
     bracket_texts = [m.group(1) for m in _QUALIFIER_BRACKET_RE.finditer(text)]
     unbracketed = _strip_trailing_noise(_QUALIFIER_BRACKET_RE.sub(" ", text))
-    segments = [s.strip() for s in _DASH_SPLIT_RE.split(unbracketed) if s.strip()]
-    hard_texts = bracket_texts + [s for s in segments[1:] if _FLAG_DASH_SEGMENT_RE.match(s)]
-    soft_text = ""
+    segments = [
+        s.strip() for s in _DASH_SPLIT_RE.split(_strip_track_prefix(unbracketed)) if s.strip()
+    ]
+    # A dash tail is a clear edition only from the third segment on ("Artist - Song - Live in
+    # Boston"). With two segments the second is usually the title itself, which may begin
+    # with "Live in ..." ("Portugal. The Man - Live in the Moment"), so it is only soft. A
+    # title tag without the artist ("Dreams - Live in Boston") is song plus tail: hard.
+    first_tail = 1 if title_only else 2
+    hard_texts = bracket_texts + [
+        s for s in segments[first_tail:] if _FLAG_DASH_SEGMENT_RE.match(s)
+    ]
+    soft_texts: list[str] = []
+    if not title_only and len(segments) == 2 and _FLAG_DASH_SEGMENT_RE.match(segments[1]):
+        soft_texts.append(segments[1])
     if segments:
         trailing = _FLAG_TRAILING_RE.search(segments[-1])
         if trailing:
-            soft_text = trailing.group(0)
+            soft_texts.append(trailing.group(0))
     hard_joined = " ".join(hard_texts)
+    soft_joined = " ".join(soft_texts)
     hard = {flag for flag, pattern in _EDITION_FLAG_PATTERNS if pattern.search(hard_joined)}
-    soft = {flag for flag, pattern in _EDITION_FLAG_PATTERNS if pattern.search(soft_text)} - hard
+    soft = {flag for flag, pattern in _EDITION_FLAG_PATTERNS if pattern.search(soft_joined)} - hard
     return hard, soft
+
+
+def _name_key(text: str) -> str:
+    return re.sub(r"\W+", "", text).casefold()
+
+
+def _is_title_without_artist(
+    title: str | None, artist: str | None, album_artist: str | None
+) -> bool:
+    """True when a title tag with a dash ("Dreams - Live in Boston") does not start with the
+    tagged artist, so its second segment is an edition tail rather than the song's title.
+
+    Without an artist tag the shape is unknown, so "Artist - Title" is assumed (soft).
+    """
+    if not title:
+        return False
+    names = [_name_key(n) for n in (artist, album_artist) if n and _name_key(n)]
+    if not names:
+        return False
+    stripped = _strip_track_prefix(_QUALIFIER_BRACKET_RE.sub(" ", title))
+    segments = [s.strip() for s in _DASH_SPLIT_RE.split(stripped) if s.strip()]
+    if len(segments) < 2:
+        return False
+    first = _name_key(segments[0])
+    return not any(first and (first in name or name in first) for name in names)
 
 
 def _edition_flags(text: str) -> list[str]:
@@ -258,6 +319,12 @@ def is_edition_suffix(segment: str) -> bool:
     if not cleaned:
         return False
     return bool(_EDITION_TAIL_RE.match(cleaned))
+
+
+def _is_bare_edition_tail(segment: str) -> bool:
+    """True for an edition tail with no song-title words ("Live" but not "Live Forever")."""
+    cleaned = _WHITESPACE_RE.sub(" ", _strip_trailing_noise(segment)).strip()
+    return bool(cleaned) and bool(_BARE_EDITION_TAIL_RE.match(cleaned))
 
 
 def _parse_int_pair(raw: str | None) -> tuple[int | None, int | None]:
@@ -718,8 +785,11 @@ def parse_hints(
     # A flag is soft only when every source that set it was a bare trailing phrase.
     hard_sources: set[str] = set()
     soft_sources: set[str] = set()
-    for source in (probe.path.stem, emb_title or ""):
-        hard, soft = _edition_flag_sources(source)
+    for source, title_only in (
+        (probe.path.stem, False),
+        (emb_title or "", _is_title_without_artist(emb_title, emb_artist, emb_album_artist)),
+    ):
+        hard, soft = _edition_flag_sources(source, title_only=title_only)
         hard_sources |= hard
         soft_sources |= soft
     soft_edition_flags = [f for f in edition_flags if f in soft_sources - hard_sources]
@@ -739,14 +809,20 @@ def parse_hints(
     has_mismatch = "title_mismatch" in signals
 
     def _strip_redundant_artist_prefix(raw_title: str, known_artist: str) -> str:
+        # "Artist - Title" is far more likely than a self-titled song plus an edition tail, so
+        # the rest is always the song title ("Oasis - Live Forever", "Prince - 1999", or
+        # "Taylor Swift - Clean"). The unsplit reading ("Bad Company - Live", the song Bad
+        # Company, live) is kept as a retry when the rest is a bare edition tail.
+        nonlocal original_embedded_pair
         prefix_parts = _DASH_SPLIT_RE.split(raw_title, maxsplit=1)
         if (
             len(prefix_parts) == 2
             and strip_diacritics_casefold(prefix_parts[0])
             == strip_diacritics_casefold(known_artist)
             and prefix_parts[1].strip()
-            and not is_edition_suffix(prefix_parts[1])
         ):
+            if _is_bare_edition_tail(prefix_parts[1]):
+                original_embedded_pair = (known_artist, raw_title)
             return prefix_parts[1].strip()
         # Reversed "Title - Artist" form ("Who Is It? - Michael Jackson", "Pop Muzik - M").
         suffix_parts = _DASH_SPLIT_RE.split(raw_title)

@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from audio_from_video.models import AudioStreamInfo, ProbeResult
+from audio_from_video.procutil import no_window_creationflags
 
 _COMMENTARY_RE = re.compile(
     r"\b(commentary|audio\s+description|descriptive|director'?s?\s+commentary)\b",
@@ -204,6 +205,7 @@ def probe_media(ffprobe_path: Path, media_path: Path, *, timeout: float = 30.0) 
         completed = subprocess.run(
             cmd,
             stdin=subprocess.DEVNULL,
+            creationflags=no_window_creationflags(),
             capture_output=True,
             text=True,
             encoding="utf-8",

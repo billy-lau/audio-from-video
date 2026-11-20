@@ -237,11 +237,12 @@ If the online services become unreachable during a run, `afv` stops prompting af
 confident matches already found are applied, and the rest use the fallback.
 
 Live, acoustic, instrumental, demo, and remix recordings are only applied automatically when
-the filename asks for them, as in `Song (Live).mp4`. The reverse also holds: `Song (Acoustic).mp4`
-gets the acoustic recording, and prompts rather than silently taking the studio version when no
-acoustic recording is found. Brackets or a dash (`Song (Live)` or `Song - Live at Wembley`) are
-the clearest way to ask; a bare phrase such as `Song Live at Wembley` also works, but titles
-that merely contain the words (*We Live in Brooklyn, Baby*) are matched as titles. A song best
+the filename asks for them, as in `Song (Live).mp4`. The reverse also holds: `Song (Live).mp4`,
+`Song (Remix).mp4`, or `Song (Acoustic).mp4` gets the requested recording, and prompts rather
+than silently taking the studio version when no such recording is found. Brackets or a dash
+(`Song (Live)` or `Artist - Song - Live at Wembley`) are the clearest way to ask; a bare phrase
+such as `Song Live at Wembley` also works, but titles that merely contain the words (*We Live in
+Brooklyn, Baby* or *Live in the Moment*) are matched as titles. A song best
 known from a live album (for
 example, a track from *MTV Unplugged in New York*) therefore prompts on a terminal and uses the
 fallback in scripts; add "(Live)" to the filename or pick the match at the prompt. Likewise, a
@@ -338,7 +339,7 @@ automatically; `afv cache clear` deletes those leftovers.
 | `0` | Every file succeeded, was skipped, or had no audio inside a folder scan. |
 | `1` | At least one file failed (or FFmpeg is missing). |
 | `2` | Invalid options, for example: an unknown `--quality`, `--title` with more than one file, inputs from several folders without `-o`, `--always-prompt` without a terminal, or no MusicBrainz contact in a non-interactive online run. |
-| `130` | Interrupted with Ctrl-C. Running FFmpeg processes are stopped and partial files are removed. |
+| `130` | Interrupted with Ctrl-C. Running FFmpeg processes are stopped, and partial files and the empty folders they were going into are removed. |
 
 ## Caveats
 

@@ -3,11 +3,14 @@
 
 Run only after the ground-truth seed labels have been reviewed and approved:
 
-    AFV_MB_CONTACT="<your reachable contact>" python scripts/record_eval_corpus.py
+    python scripts/record_eval_corpus.py --split tuning --reuse-existing --maintainer-contact
 
 The script resolves the MusicBrainz User-Agent from AFV_MB_USER_AGENT, AFV_MB_CONTACT,
-or config.toml (exit code 2 if missing), runs the real resolver in record-all mode on every
-seed through a RecordingTransport with real rate limits, and writes gzipped frozen
+or config.toml. Only with --maintainer-contact does it fall back to the maintainer's
+contact (DEFAULT_MB_CONTACT; never used by the afv app); otherwise a missing contact
+exits with code 2 before any network access. The contact in use is printed at the start
+of every run. It runs the real resolver in record-all mode on every seed through a
+RecordingTransport with real rate limits, and writes gzipped frozen
 tests/fixtures/eval_tuning.json.gz and tests/fixtures/eval_holdout.json.gz. Request
 headers are never stored, and the seed files are only read, never modified.
 """
@@ -15,6 +18,7 @@ headers are never stored, and the seed files are only read, never modified.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from collections.abc import Callable
@@ -39,6 +43,25 @@ from audio_from_video.providers.itunes import ITUNES_MIN_INTERVAL, ITunesClient
 from audio_from_video.providers.musicbrainz import MB_MIN_INTERVAL, MusicBrainzClient
 
 FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+
+# Maintainer contact sent to MusicBrainz when recording eval corpora (dev tooling only).
+DEFAULT_MB_CONTACT = "video2audio.battered039@passinbox.com"
+
+
+def resolve_recording_user_agent(*, maintainer_contact: bool = False) -> tuple[str, str]:
+    """Return (User-Agent, source). A configured contact (AFV_MB_USER_AGENT, AFV_MB_CONTACT,
+    or config.toml) always wins; DEFAULT_MB_CONTACT is used only when asked for."""
+    try:
+        return resolve_mb_user_agent(load_config()), "configured"
+    except ConfigError as exc:
+        if not maintainer_contact:
+            raise ConfigError(
+                f"{exc} Or pass --maintainer-contact to record under the maintainer's contact."
+            ) from exc
+    env = {**os.environ, "AFV_MB_CONTACT": DEFAULT_MB_CONTACT}
+    return resolve_mb_user_agent(load_config(env=env), env), "maintainer default"
+
+
 SPLITS = (
     ("eval_seed_tuning.json", "eval_tuning.json.gz"),
     ("eval_seed_holdout.json", "eval_holdout.json.gz"),
@@ -307,12 +330,23 @@ def main(
             "only URLs missing from it are fetched, and existing responses are kept as-is."
         ),
     )
+    parser.add_argument(
+        "--maintainer-contact",
+        action="store_true",
+        help=(
+            "Without a configured contact, send requests under the maintainer's contact "
+            "(DEFAULT_MB_CONTACT). A configured contact still wins."
+        ),
+    )
     args = parser.parse_args(argv)
     try:
-        user_agent = resolve_mb_user_agent(load_config())
+        user_agent, source = resolve_recording_user_agent(
+            maintainer_contact=args.maintainer_contact
+        )
     except ConfigError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
+    print(f"MusicBrainz User-Agent: {user_agent} ({source})")
     selected = (
         SPLITS if args.split == "all" else tuple(pair for pair in SPLITS if args.split in pair[0])
     )

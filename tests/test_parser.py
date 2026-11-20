@@ -588,3 +588,54 @@ def test_edition_flags_come_only_from_qualifiers_not_names() -> None:
     }
     for path, flags in expected.items():
         assert parse_hints(_probe(path)).edition_flags == flags, path
+
+
+def test_a_title_that_begins_with_live_in_is_only_a_soft_flag() -> None:
+    """Review regression: with two dash segments, the second is usually the title itself."""
+    soft_only = [
+        "/x/Portugal. The Man - Live in the Moment.mp4",
+        "/x/Wild Nothing - Live in Dreams.mp4",
+        "/x/Future - Live from the Gutter.mp4",
+        "/x/Main Source - Live at the Barbeque.mp4",
+    ]
+    for path in soft_only:
+        hints = parse_hints(_probe(path))
+        assert hints.edition_flags == ["live"], path
+        assert hints.soft_edition_flags == ["live"], path
+
+    # From the third segment on, a dash tail is still a clear edition request.
+    hard = {
+        "/x/Artist - Song - Live in Boston.mp4": ["live"],
+        "/x/Artist - Song - Live.mp4": ["live"],
+        "/x/Roxy Music - More Than This - 2012 Remaster.mp4": ["remaster"],
+    }
+    for path, flags in hard.items():
+        hints = parse_hints(_probe(path))
+        assert hints.edition_flags == flags, path
+        assert hints.soft_edition_flags == [], path
+
+
+def test_track_prefix_and_title_tags_in_dash_segment_counting() -> None:
+    """Review regressions: a track-number dash adds no segment, and a title tag that does not
+    start with the tagged artist treats its second segment as an edition tail."""
+    for path in (
+        "/x/01 - Portugal. The Man - Live in the Moment.mp4",
+        "/x/1-02 - Portugal. The Man - Live in the Moment.mp4",
+    ):
+        assert parse_hints(_probe(path)).soft_edition_flags == ["live"], path
+    hints = parse_hints(_probe("/x/01 - Artist - Song - Live in Boston.mp4"))
+    assert hints.edition_flags == ["live"]
+    assert hints.soft_edition_flags == []
+
+    def _tagged(tags: dict[str, str]) -> list[str]:
+        probe = ProbeResult(
+            path=Path("/x/clip.mp4"), duration_seconds=200.0, format_name=None, container_tags=tags
+        )
+        return parse_hints(probe).soft_edition_flags
+
+    assert _tagged({"artist": "Fleetwood Mac", "title": "Dreams - Live in Boston"}) == []
+    assert _tagged({"artist": "Fleetwood Mac", "title": "Dreams - Live"}) == []
+    # A title tag that repeats the artist, or one with no artist tag, stays soft.
+    portugal = {"artist": "Portugal. The Man", "title": "Portugal. The Man - Live in the Moment"}
+    assert _tagged(portugal) == ["live"]
+    assert _tagged({"title": "Dreams - Live"}) == ["live"]
