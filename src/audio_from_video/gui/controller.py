@@ -116,33 +116,55 @@ def _extract_raw_binary_path(
 
 
 def _fallback_config_with_raw_binaries(config_path: Path) -> AppConfig:
-    """Build a default ``AppConfig`` preserving valid raw ``[binaries]`` paths.
+    """Build a fallback ``AppConfig`` from ``config.toml`` or its raw ``[binaries]`` table.
 
-    When ``config.toml`` fails full validation (for example, an unsupported
-    ``[audio] quality`` value), ``RunController._config`` remains ``None``.
-    Parsing only the raw ``[binaries]`` table via ``tomllib`` preserves custom
-    ``ffmpeg`` and ``ffprobe`` paths (plus ``AFV_FFMPEG_PATH`` and
-    ``AFV_FFPROBE_PATH`` environment overrides) while keeping all other fields
-    at validated built-in defaults.
+    When full ``load_config()`` fails during preflight (for example, because
+    ``AFV_MB_CONTACT`` or ``AFV_MB_USER_AGENT`` is invalid, or because
+    ``config.toml`` contains an invalid value), ``RunController._config``
+    remains ``None``. First try reading ``config.toml`` with ``env={}`` so a
+    valid file keeps its ``[audio]``, ``[output]``, ``[execution]``,
+    ``[matching]``, and ``[binaries]`` defaults for offline use instead of
+    discarding them. Loaded ``[musicbrainz]`` credentials are cleared so this
+    fallback never carries them into online mode without re-validating
+    environment overrides. If ``config.toml`` itself is unreadable or invalid,
+    fall back to built-in defaults plus raw ``[binaries]`` paths parsed via
+    ``tomllib``. Valid ``AFV_FFMPEG_PATH``, ``AFV_FFPROBE_PATH``, and
+    ``AFV_OUTPUT_DIR`` environment overrides are applied cleanly on top.
     """
-    cfg = _config_mod.AppConfig(config_path=config_path)
-    raw: object = None
+    cfg: AppConfig | None = None
     try:
-        if config_path.is_file():
-            with config_path.open("rb") as fh:
-                raw = tomllib.load(fh)
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        raw = None
+        cfg = _config_mod.load_config(config_path=config_path, env={})
+    except (_config_mod.ConfigError, OSError, UnicodeDecodeError):
+        cfg = None
 
-    if isinstance(raw, dict):
-        binaries_tbl = raw.get("binaries")
-        if isinstance(binaries_tbl, dict):
-            cfg.binaries.ffmpeg_path = _extract_raw_binary_path(
-                binaries_tbl, "ffmpeg", "ffmpeg_path"
-            )
-            cfg.binaries.ffprobe_path = _extract_raw_binary_path(
-                binaries_tbl, "ffprobe", "ffprobe_path"
-            )
+    if cfg is not None:
+        # Never carry loaded file credentials across a failed preflight;
+        # online runs must pass full validation first.
+        cfg.musicbrainz.contact = None
+        cfg.musicbrainz.user_agent_override = None
+        if cfg.binaries.ffmpeg_path and "\x00" in cfg.binaries.ffmpeg_path:
+            cfg.binaries.ffmpeg_path = None
+        if cfg.binaries.ffprobe_path and "\x00" in cfg.binaries.ffprobe_path:
+            cfg.binaries.ffprobe_path = None
+    else:
+        cfg = _config_mod.AppConfig(config_path=config_path)
+        raw: object = None
+        try:
+            if config_path.is_file():
+                with config_path.open("rb") as fh:
+                    raw = tomllib.load(fh)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+            raw = None
+
+        if isinstance(raw, dict):
+            binaries_tbl = raw.get("binaries")
+            if isinstance(binaries_tbl, dict):
+                cfg.binaries.ffmpeg_path = _extract_raw_binary_path(
+                    binaries_tbl, "ffmpeg", "ffmpeg_path"
+                )
+                cfg.binaries.ffprobe_path = _extract_raw_binary_path(
+                    binaries_tbl, "ffprobe", "ffprobe_path"
+                )
 
     env_ffmpeg = os.environ.get("AFV_FFMPEG_PATH", "").strip()
     if env_ffmpeg and "\x00" not in env_ffmpeg:
@@ -150,6 +172,9 @@ def _fallback_config_with_raw_binaries(config_path: Path) -> AppConfig:
     env_ffprobe = os.environ.get("AFV_FFPROBE_PATH", "").strip()
     if env_ffprobe and "\x00" not in env_ffprobe:
         cfg.binaries.ffprobe_path = env_ffprobe
+    env_output_dir = os.environ.get("AFV_OUTPUT_DIR", "").strip()
+    if env_output_dir and "\x00" not in env_output_dir:
+        cfg.output.output_dir = env_output_dir
     return cfg
 
 
@@ -492,7 +517,7 @@ class RunController(QObject):
         return _config_mod.default_config_path()
 
     def _fallback_config(self) -> AppConfig:
-        """Build a fallback ``AppConfig`` carrying valid raw ``[binaries]`` paths."""
+        """Build a fallback ``AppConfig`` preserving valid ``config.toml`` or raw ``[binaries]``."""
         return _fallback_config_with_raw_binaries(self._config_path())
 
     def _effective_cache_dir(self) -> Path:
@@ -709,8 +734,13 @@ class RunController(QObject):
         user_agent: str | None = None
         if not options.offline:
             try:
+                if self._config is None:
+                    # Re-validate the full config file and AFV_* env overrides so
+                    # online mode stays blocked after a failed preflight (even if
+                    # config.toml is valid and another override masks the bad var).
+                    _config_mod.load_config(config_path=self._config_path())
                 user_agent = _config_mod.resolve_mb_user_agent(cfg)
-            except _config_mod.ConfigError as exc:
+            except (_config_mod.ConfigError, UnicodeDecodeError) as exc:
                 msg = str(exc)
                 self.input_error.emit("missing_contact", msg)
                 self.setup_error.emit(msg)

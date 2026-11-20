@@ -65,6 +65,7 @@ from audio_from_video.gui.dialogs.edition import EditionDialog
 from audio_from_video.gui.dialogs.match import MatchDialog
 from audio_from_video.gui.dialogs.stream import StreamDialog
 from audio_from_video.gui.models.plan_table import PlanFilterMode
+from audio_from_video.gui.screens import _common as screens_common_mod
 from audio_from_video.logging_setup import PACKAGE_LOGGER_NAME
 from audio_from_video.lookup import TrackResolver
 from audio_from_video.models import MatchDecision, PlanAction, RunOutcome, RunSummary
@@ -250,7 +251,7 @@ def _isolated_env_and_no_network(
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg_cache"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg_state"))
     monkeypatch.setenv("AFV_CONFIG_PATH", str(config_file))
-    monkeypatch.setattr(app_mod, "user_log_dir", lambda _name: str(log_dir))
+    monkeypatch.setattr(screens_common_mod, "user_log_dir", lambda _name: str(log_dir))
 
     previous_format = QSettings.defaultFormat()
     previous_sys_hook = sys.excepthook
@@ -3464,3 +3465,112 @@ def test_e2e_settings_opened_during_active_preflight_drains_cache_stats(
     finally:
         release_recheck.set()
         _cleanup_window(qtbot, win, ctrl)
+
+
+def test_default_log_dir_delegates_to_common_log_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _isolated_env_and_no_network: dict[str, Path],
+) -> None:
+    """``app.default_log_dir()`` shares a single source of truth with ``log_directory()``."""
+    _ = _isolated_env_and_no_network
+    expected = tmp_path / "unified_logs"
+    monkeypatch.setattr(screens_common_mod, "user_log_dir", lambda _name: str(expected))
+    assert app_mod.default_log_dir() == screens_common_mod.log_directory() == expected
+    assert app_mod.default_log_file() == expected / GUI_LOG_FILENAME
+
+
+def test_error_panel_open_log_folder_shows_and_clears_inline_feedback(
+    qtbot: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _isolated_env_and_no_network: dict[str, Path],
+) -> None:
+    """Error panel reports failed log-folder opens inline and clears on success or dismissal."""
+    _ = _isolated_env_and_no_network
+    opened_paths: list[Path] = []
+    opener_returns = [False]
+
+    def _fake_open_local_path(path: Path, *, fallback_to_parent: bool = False) -> bool:
+        _ = fallback_to_parent
+        opened_paths.append(path)
+        return opener_returns[0]
+
+    monkeypatch.setattr(app_mod, "open_local_path", _fake_open_local_path)
+
+    missing_dir = tmp_path / "missing_logs"
+    fake = FakeController(state=ControllerState.INPUTS)
+    win = MainWindow(fake, log_file=missing_dir / GUI_LOG_FILENAME)
+    qtbot.addWidget(win)
+    win.show()
+
+    win.show_error_panel("Planning failed", "Synthetic error traceback")
+    assert not win.error_panel.isHidden()
+    assert win.error_log_feedback_label.isHidden()
+    assert win.error_log_feedback_label.text() == ""
+
+    # Case 1: folder is missing -> shows missing-folder notice and preserves error details.
+    win.open_error_log_button.click()
+    assert opened_paths == [missing_dir]
+    assert not win.error_log_feedback_label.isHidden()
+    assert "does not exist yet" in win.error_log_feedback_label.text()
+    assert str(missing_dir) in win.error_log_feedback_label.text()
+    assert win.error_details.toPlainText() == "Synthetic error traceback"
+
+    # Case 2: folder exists, but desktop opener fails -> shows failure notice.
+    missing_dir.mkdir(parents=True, exist_ok=True)
+    win.open_error_log_button.click()
+    assert opened_paths == [missing_dir, missing_dir]
+    assert not win.error_log_feedback_label.isHidden()
+    assert "Could not open log folder" in win.error_log_feedback_label.text()
+    assert str(missing_dir) in win.error_log_feedback_label.text()
+
+    # Case 3: subsequent successful open clears and hides the inline feedback.
+    opener_returns[0] = True
+    win.open_error_log_button.click()
+    assert opened_paths == [missing_dir, missing_dir, missing_dir]
+    assert win.error_log_feedback_label.isHidden()
+    assert win.error_log_feedback_label.text() == ""
+    assert not win.error_panel.isHidden()
+
+    # Case 4: dismissing the error panel clears stale inline feedback.
+    opener_returns[0] = False
+    win.open_error_log_button.click()
+    assert not win.error_log_feedback_label.isHidden()
+    win.dismiss_error_button.click()
+    assert win.error_panel.isHidden()
+    assert win.error_log_feedback_label.isHidden()
+    assert win.error_log_feedback_label.text() == ""
+
+    # Case 5: default log directory fallback (log_file=None) uses strict open_local_path.
+    fallback_missing = tmp_path / "fallback_missing_logs"
+    monkeypatch.setattr(app_mod, "log_directory", lambda: fallback_missing)
+    monkeypatch.setattr(app_mod, "open_local_path", screens_common_mod.open_local_path)
+    desktop_urls: list[object] = []
+    monkeypatch.setattr(
+        screens_common_mod.QDesktopServices,
+        "openUrl",
+        lambda url: (desktop_urls.append(url), False)[1],
+    )
+
+    win_default = MainWindow(fake)
+    qtbot.addWidget(win_default)
+    win_default.show()
+    win_default.show_error_panel("Boom", "Details")
+    win_default.open_error_log_button.click()
+    assert desktop_urls == []
+    assert not win_default.error_log_feedback_label.isHidden()
+    assert "does not exist yet" in win_default.error_log_feedback_label.text()
+
+    # Re-showing the error panel for a new error clears the prior log-folder notice.
+    win_default.show_error_panel("Second error", "Fresh details")
+    assert win_default.error_log_feedback_label.isHidden()
+    assert win_default.error_log_feedback_label.text() == ""
+
+    # Transitioning to PLANNING also hides the error panel and clears feedback.
+    win_default.open_error_log_button.click()
+    assert not win_default.error_log_feedback_label.isHidden()
+    fake.set_state(ControllerState.PLANNING)
+    assert win_default.error_panel.isHidden()
+    assert win_default.error_log_feedback_label.isHidden()
+    assert win_default.error_log_feedback_label.text() == ""

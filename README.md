@@ -266,8 +266,8 @@ sudo apt install libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3
 | :--- | :--- |
 | `Ctrl+O` / `Cmd+O` | Add video files from the Inputs screen. |
 | `Ctrl+,` / `Cmd+,` | Open **Settings** (when on the Setup or Inputs screen). |
-| `Enter` | Accept the default action in the active dialog or form (**Use fallback** on an uncertain or unmatched **Match** dialog, or **Use selected** when confirming an auto-accepted match). |
-| `Esc` | Dismiss a dialog. Inside the **Match** dialog, closes an open **Search again** or **Enter tags** form first; pressing `Esc` again defaults to the safe **Use fallback** choice. |
+| `Enter` | Accept the default action in the active dialog or form (**Use fallback** on an uncertain or unmatched **Match** dialog, or **Use selected** when confirming an auto-accepted match). Ignored while a manual search runs. |
+| `Esc` | Dismiss a dialog. Inside the **Match** dialog, closes an open **Search again** or **Enter tags** form first; pressing `Esc` again defaults to the safe **Use fallback** choice. Both `Esc` and `Enter` are ignored while a manual search runs; use **Cancel run** instead (`Tab` then `Space`, mouse click, or its mnemonic). |
 | `1`–`9` | Pick the corresponding candidate row inside the **Match** dialog. |
 
 ## How tracks are named and organized
