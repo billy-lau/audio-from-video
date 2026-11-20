@@ -14,11 +14,9 @@ from audio_from_video.models import (
     AudioStreamInfo,
     Candidate,
     MatchDecision,
-    MatchStatus,
     MediaInput,
     ParsedHints,
     ReleaseRef,
-    TrackMetadata,
 )
 from audio_from_video.planner import (
     AliasAction,
@@ -27,8 +25,31 @@ from audio_from_video.planner import (
     CandidatePromptResponse,
     PromptCallbacks,
 )
+from audio_from_video.presentation import (
+    MAX_DISPLAY_CANDIDATES,
+    build_manual_metadata,
+    format_candidate_date,
+    format_candidate_track,
+    format_edition_details,
+    group_editions,
+)
 
-MAX_DISPLAY_CANDIDATES = 5
+# Retain underscored aliases for callers that previously imported internal helpers.
+_format_candidate_date = format_candidate_date
+_format_candidate_track = format_candidate_track
+_format_edition_details = format_edition_details
+
+__all__ = [
+    "EDITION_PAGE_SIZE",
+    "MAX_DISPLAY_CANDIDATES",
+    "build_manual_metadata",
+    "format_candidate_date",
+    "format_candidate_track",
+    "format_edition_details",
+    "group_editions",
+    "make_rich_prompt_callbacks",
+    "prompt_mb_contact",
+]
 
 
 def _emit(console: Console, *objects: object, **kwargs: object) -> None:
@@ -49,37 +70,6 @@ def _make_reader(console: Console, input_fn: Callable[[str], str] | None) -> Cal
         return console.input(prompt, markup=False, emoji=False)
 
     return _read
-
-
-def group_editions(
-    editions: Sequence[ReleaseRef], default_edition: ReleaseRef
-) -> list[tuple[ReleaseRef, int]]:
-    """Collapse pressings sharing format, disc count, track count, and edition name.
-
-    Editions arrive in tie-breaker order, so the first of each group represents it (the
-    default edition always represents its own group). Returns (representative, count).
-    """
-    order: list[tuple[object, ...]] = []
-    groups: dict[tuple[object, ...], list[ReleaseRef]] = {}
-    for ref in editions:
-        key = (
-            tuple(f.casefold() for f in ref.formats),
-            ref.disc_count,
-            ref.track_count,
-            (ref.disambiguation or "").casefold(),
-        )
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(ref)
-    result: list[tuple[ReleaseRef, int]] = []
-    for key in order:
-        members = groups[key]
-        rep = default_edition if default_edition in members else members[0]
-        result.append((rep, len(members)))
-    if not any(rep == default_edition for rep, _ in result):
-        result.insert(0, (default_edition, 1))
-    return result
 
 
 def prompt_mb_contact(
@@ -110,27 +100,6 @@ def prompt_mb_contact(
             return validate_mb_contact(raw)
         except ConfigError as exc:
             _emit(console, f"[red]Invalid contact:[/red] {escape(str(exc))}")
-
-
-def _format_candidate_date(cand: Candidate) -> str:
-    return cand.release_date or cand.release_group_date or "—"
-
-
-def _format_candidate_track(cand: Candidate) -> str:
-    if cand.track_number is None:
-        return "—"
-    if cand.track_total:
-        return f"{cand.track_number}/{cand.track_total}"
-    return str(cand.track_number)
-
-
-def _format_edition_details(ref: ReleaseRef) -> str:
-    parts: list[str] = []
-    if ref.title:
-        parts.append(ref.title)
-    if ref.disambiguation:
-        parts.append(f"({ref.disambiguation})")
-    return " ".join(parts) or "—"
 
 
 def make_rich_prompt_callbacks(
@@ -230,8 +199,8 @@ def make_rich_prompt_callbacks(
                     escape(cand.artist),
                     escape(cand.title),
                     escape(cand.album or "—"),
-                    escape(_format_candidate_date(cand)),
-                    escape(_format_candidate_track(cand)),
+                    escape(format_candidate_date(cand)),
+                    escape(format_candidate_track(cand)),
                     escape(cand.source),
                 )
             _emit(console, table)
@@ -308,15 +277,7 @@ def make_rich_prompt_callbacks(
                 if not m_title:
                     _emit(console, "[yellow]Title is required for custom tags.[/yellow]")
                     continue
-                custom = TrackMetadata(
-                    artist=m_artist,
-                    album_artist=m_artist,
-                    title=m_title,
-                    album=m_album,
-                    track_number=m_track,
-                    match_status=MatchStatus.MANUAL,
-                    source_description="manual",
-                )
+                custom = build_manual_metadata(m_artist, m_title, m_album, m_track)
                 return CandidatePromptResponse(
                     action=CandidateAction.CUSTOM_TAGS, custom_metadata=custom
                 )
@@ -365,7 +326,7 @@ def make_rich_prompt_callbacks(
                     escape(", ".join(ref.formats) if ref.formats else "—"),
                     str(ref.disc_count) if ref.disc_count is not None else "—",
                     str(ref.track_count) if ref.track_count is not None else "—",
-                    escape(_format_edition_details(ref)),
+                    escape(format_edition_details(ref)),
                     str(count),
                     "yes" if idx == default_pos else "",
                 )

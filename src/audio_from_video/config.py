@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
 import re
 import tempfile
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from urllib.parse import urlparse
 
 from platformdirs import user_cache_dir, user_config_dir
@@ -19,6 +21,32 @@ from audio_from_video import __version__
 from audio_from_video.models import ConflictPolicy, QualitySpec
 
 APP_NAME = "audio-from-video"
+
+# AppConfig attribute path -> TOML section and key written in config.toml.
+EDITABLE_SETTINGS: Mapping[str, str] = MappingProxyType(
+    {
+        "binaries.ffmpeg_path": "[binaries] ffmpeg",
+        "binaries.ffprobe_path": "[binaries] ffprobe",
+        "audio.quality": "[audio] quality",
+        "audio.copy_mp3": "[audio] copy_mp3",
+        "output.output_dir": "[output] output_dir",
+        "output.flat": "[output] flat",
+        "output.on_conflict": "[output] on_conflict",
+        "execution.jobs": "[execution] jobs",
+        "musicbrainz.contact": "[musicbrainz] contact",
+    }
+)
+
+# Environment variable -> AppConfig attribute path it overrides (for "set by AFV_…").
+ENV_OVERRIDES: Mapping[str, str] = MappingProxyType(
+    {
+        "AFV_FFMPEG_PATH": "binaries.ffmpeg_path",
+        "AFV_FFPROBE_PATH": "binaries.ffprobe_path",
+        "AFV_OUTPUT_DIR": "output.output_dir",
+        "AFV_MB_CONTACT": "musicbrainz.contact",
+        "AFV_MB_USER_AGENT": "musicbrainz.user_agent_override",
+    }
+)
 
 VALID_CBR_BITRATES: frozenset[int] = frozenset(
     {8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 192, 224, 256, 320}
@@ -517,18 +545,433 @@ def save_mb_contact(contact: str, config_path: Path | None = None) -> Path:
     return target
 
 
-def _atomic_write_text(target: Path, text: str) -> None:
-    """Write text atomically (owner-only temp file, then os.replace)."""
+def _atomic_write_text(
+    target: Path,
+    text: str,
+    *,
+    validator: Callable[[Path], object] | None = None,
+) -> None:
+    """Write text atomically (owner-only temp file, optional validation, then os.replace)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=".afv-cfg-", suffix=".tmp", dir=str(target.parent))
     tmp_path = Path(tmp_name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
+        if validator is not None:
+            validator(tmp_path)
         os.replace(tmp_path, target)
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+@dataclass(frozen=True, slots=True)
+class _SectionEdit:
+    """Normalized TOML line edit inside one table header."""
+
+    toml_key: str
+    value: object
+    line: str | None
+    remove_keys: tuple[str, ...] = ()
+
+
+def _toml_quote_str(value: str) -> str:
+    """Encode ``value`` as a single-line TOML 1.0 basic string literal."""
+    out: list[str] = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\b":
+            out.append("\\b")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\f":
+            out.append("\\f")
+        elif ch == "\r":
+            out.append("\\r")
+        elif code < 0x20 or code == 0x7F:
+            out.append(f"\\u{code:04X}")
+        elif 0xD800 <= code <= 0xDFFF:
+            raise ConfigError("Config string cannot contain lone UTF-16 surrogate code points.")
+        else:
+            out.append(ch)
+    out.append('"')
+    return "".join(out)
+
+
+def _split_toml_lines(text: str) -> list[str]:
+    """Split TOML text on LF or CRLF without splitting on Unicode line separators."""
+    if not text:
+        return []
+    normalized = text.replace("\r\n", "\n")
+    if normalized.endswith("\n"):
+        normalized = normalized[:-1]
+    if not normalized:
+        return []
+    return normalized.split("\n")
+
+
+def _active_key_pattern(toml_key: str) -> re.Pattern[str]:
+    esc = re.escape(toml_key)
+    return re.compile(rf"""^\s*(?:{esc}|"{esc}"|'{esc}')\s*=""")
+
+
+def _commented_key_pattern(toml_key: str) -> re.Pattern[str]:
+    esc = re.escape(toml_key)
+    return re.compile(rf"^\s*#\s*{esc}\s*=")
+
+
+def _coerce_optional_path(value: object, key_name: str) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, os.PathLike):
+        raw = os.fspath(value)
+        if not isinstance(raw, str):
+            raise ConfigError(f"Config key {key_name!r} must be a string, path, or None.")
+    elif isinstance(value, str):
+        raw = value
+    else:
+        raise ConfigError(f"Config key {key_name!r} must be a string, path, or None.")
+    if "\x00" in raw:
+        raise ConfigError(f"Config key {key_name!r} cannot contain NUL bytes.")
+    cleaned = raw.strip()
+    return cleaned or None
+
+
+def _prepare_setting_edit(attr_path: str, raw_value: object) -> tuple[str, _SectionEdit]:
+    """Validate and serialize one editable ``AppConfig`` attribute update."""
+    if attr_path not in EDITABLE_SETTINGS:
+        valid = ", ".join(EDITABLE_SETTINGS)
+        raise ValueError(
+            f"Unknown or non-editable config setting {attr_path!r}. Editable: {valid}."
+        )
+
+    if attr_path == "binaries.ffmpeg_path":
+        cleaned = _coerce_optional_path(raw_value, attr_path)
+        line = None if cleaned is None else f"ffmpeg = {_toml_quote_str(cleaned)}"
+        return (
+            "binaries",
+            _SectionEdit(
+                toml_key="ffmpeg",
+                value=cleaned,
+                line=line,
+                remove_keys=("ffmpeg_path",),
+            ),
+        )
+
+    if attr_path == "binaries.ffprobe_path":
+        cleaned = _coerce_optional_path(raw_value, attr_path)
+        line = None if cleaned is None else f"ffprobe = {_toml_quote_str(cleaned)}"
+        return (
+            "binaries",
+            _SectionEdit(
+                toml_key="ffprobe",
+                value=cleaned,
+                line=line,
+                remove_keys=("ffprobe_path",),
+            ),
+        )
+
+    if attr_path == "audio.quality":
+        if not isinstance(raw_value, str):
+            raise ConfigError("Config key 'audio.quality' must be a string.")
+        cleaned = raw_value.strip()
+        if not cleaned:
+            raise ConfigError("Config key 'audio.quality' cannot be empty.")
+        parse_quality(cleaned)
+        return (
+            "audio",
+            _SectionEdit(
+                toml_key="quality",
+                value=cleaned,
+                line=f"quality = {_toml_quote_str(cleaned)}",
+            ),
+        )
+
+    if attr_path == "audio.copy_mp3":
+        if not isinstance(raw_value, bool):
+            raise ConfigError("Config key 'audio.copy_mp3' must be a boolean.")
+        literal = "true" if raw_value else "false"
+        return (
+            "audio",
+            _SectionEdit(toml_key="copy_mp3", value=raw_value, line=f"copy_mp3 = {literal}"),
+        )
+
+    if attr_path == "output.output_dir":
+        cleaned = _coerce_optional_path(raw_value, attr_path)
+        line = None if cleaned is None else f"output_dir = {_toml_quote_str(cleaned)}"
+        return ("output", _SectionEdit(toml_key="output_dir", value=cleaned, line=line))
+
+    if attr_path == "output.flat":
+        if not isinstance(raw_value, bool):
+            raise ConfigError("Config key 'output.flat' must be a boolean.")
+        literal = "true" if raw_value else "false"
+        return ("output", _SectionEdit(toml_key="flat", value=raw_value, line=f"flat = {literal}"))
+
+    if attr_path == "output.on_conflict":
+        if isinstance(raw_value, ConflictPolicy):
+            policy = raw_value
+        elif isinstance(raw_value, str):
+            try:
+                policy = ConflictPolicy(raw_value.strip())
+            except ValueError as exc:
+                raise ConfigError(
+                    "Config key 'output.on_conflict' must be 'skip', 'overwrite', or 'rename'."
+                ) from exc
+        else:
+            raise ConfigError(
+                "Config key 'output.on_conflict' must be 'skip', 'overwrite', or 'rename'."
+            )
+        return (
+            "output",
+            _SectionEdit(
+                toml_key="on_conflict",
+                value=policy.value,
+                line=f"on_conflict = {_toml_quote_str(policy.value)}",
+            ),
+        )
+
+    if attr_path == "execution.jobs":
+        jobs = validate_jobs(raw_value)  # type: ignore[arg-type]
+        return ("execution", _SectionEdit(toml_key="jobs", value=jobs, line=f"jobs = {jobs}"))
+
+    if attr_path == "musicbrainz.contact":
+        if raw_value is None:
+            return ("musicbrainz", _SectionEdit(toml_key="contact", value=None, line=None))
+        if not isinstance(raw_value, str):
+            raise ConfigError("Config key 'musicbrainz.contact' must be a string or None.")
+        validated = validate_mb_contact(raw_value)
+        return (
+            "musicbrainz",
+            _SectionEdit(
+                toml_key="contact",
+                value=validated,
+                line=f"contact = {_toml_quote_str(validated)}",
+            ),
+        )
+
+    raise ValueError(f"Unknown or non-editable config setting {attr_path!r}.")  # pragma: no cover
+
+
+def _toml_values_equal(left: object, right: object) -> bool:
+    """Strictly compare two ``tomllib``-parsed values, treating ``bool`` and ``int`` as distinct."""
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        if left.keys() != right.keys():
+            return False
+        return all(_toml_values_equal(left[k], right[k]) for k in left)
+    if isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            return False
+        return all(_toml_values_equal(a, b) for a, b in zip(left, right, strict=True))
+    if (
+        isinstance(left, float)
+        and isinstance(right, float)
+        and math.isnan(left)
+        and math.isnan(right)
+    ):
+        return True
+    return left == right
+
+
+def save_settings(
+    updates: Mapping[str, object],
+    config_path: Path | None = None,
+) -> Path:
+    """Persist selected settings to ``config.toml`` while preserving comments and other keys.
+
+    Keys in ``updates`` must belong to ``EDITABLE_SETTINGS``; unknown keys raise
+    ``ValueError``. Invalid values raise ``ConfigError`` without modifying the existing
+    file. Legacy ``ffmpeg_path`` and ``ffprobe_path`` lines inside ``[binaries]`` are
+    removed when ``binaries.ffmpeg_path`` or ``binaries.ffprobe_path`` is updated.
+    Passing ``None`` (or an empty path string for optional path settings) removes the
+    corresponding key from the file.
+    """
+    # Validate all keys before checking values so unknown keys always raise plain ValueError.
+    for attr_path in updates:
+        if attr_path not in EDITABLE_SETTINGS:
+            valid = ", ".join(EDITABLE_SETTINGS)
+            raise ValueError(
+                f"Unknown or non-editable config setting {attr_path!r}. Editable: {valid}."
+            )
+
+    section_edits: dict[str, dict[str, _SectionEdit]] = {}
+    for attr_path, raw_value in updates.items():
+        section, edit = _prepare_setting_edit(attr_path, raw_value)
+        section_edits.setdefault(section, {})[edit.toml_key] = edit
+
+    target = config_path if config_path is not None else default_config_path()
+    if target.exists() and not target.is_file():
+        raise ConfigError(f"Config path {target} exists and is not a regular file.")
+
+    file_exists = target.is_file()
+    if file_exists:
+        try:
+            existing_text = target.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ConfigError(f"Failed to read config file {target}: {exc}") from exc
+        try:
+            before_parsed = tomllib.loads(existing_text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ConfigError(f"Failed to read config file {target}: {exc}") from exc
+        existing_lines = _split_toml_lines(existing_text)
+    else:
+        before_parsed = {}
+        existing_lines = []
+
+    if not section_edits:
+        if file_exists:
+            load_config(config_path=target, env={})
+            return target
+        _atomic_write_text(
+            target,
+            "",
+            validator=lambda candidate: load_config(config_path=candidate, env={}),
+        )
+        return target
+
+    expected: dict[str, object] = copy.deepcopy(before_parsed)
+    for section, edits in section_edits.items():
+        if section in expected:
+            table = expected[section]
+            if not isinstance(table, dict):
+                raise ConfigError(
+                    f"Unable to safely update {target}: [{section}] is not a TOML table."
+                )
+            for edit in edits.values():
+                for legacy in edit.remove_keys:
+                    table.pop(legacy, None)
+                if edit.line is None:
+                    table.pop(edit.toml_key, None)
+                else:
+                    table[edit.toml_key] = edit.value
+        else:
+            added = {edit.toml_key: edit.value for edit in edits.values() if edit.line is not None}
+            if added:
+                expected[section] = added
+
+    section_patterns: dict[
+        str,
+        tuple[
+            dict[str, re.Pattern[str]],
+            dict[str, re.Pattern[str]],
+            tuple[re.Pattern[str], ...],
+        ],
+    ] = {}
+    for section, edits in section_edits.items():
+        active_pats = {key: _active_key_pattern(key) for key in edits}
+        comment_pats = {key: _commented_key_pattern(key) for key in edits}
+        legacy_pats = tuple(
+            _active_key_pattern(legacy) for edit in edits.values() for legacy in edit.remove_keys
+        )
+        section_patterns[section] = (active_pats, comment_pats, legacy_pats)
+
+    out_lines: list[str] = []
+    current_section: str | None = None
+    seen_sections: set[str] = set()
+    replaced: set[str] = set()
+    commented_idx: dict[str, int] = {}
+
+    def _flush_section(section: str) -> None:
+        edits = section_edits[section]
+        # Pass 1: replace commented template placeholders in place (indices stay stable).
+        for toml_key, edit in edits.items():
+            if edit.line is not None and toml_key not in replaced and toml_key in commented_idx:
+                out_lines[commented_idx[toml_key]] = edit.line
+                replaced.add(toml_key)
+        # Pass 2: insert remaining new keys before trailing blank separator lines.
+        for toml_key, edit in edits.items():
+            if edit.line is not None and toml_key not in replaced:
+                _insert_before_trailing_blanks(out_lines, edit.line)
+                replaced.add(toml_key)
+
+    for line in existing_lines:
+        header = _TABLE_HEADER_RE.match(line)
+        if header:
+            if current_section is not None:
+                _flush_section(current_section)
+            is_array_table = line.lstrip().startswith("[[")
+            section_name = header.group(1).strip()
+            if (
+                not is_array_table
+                and section_name in section_edits
+                and section_name not in seen_sections
+            ):
+                current_section = section_name
+                seen_sections.add(section_name)
+                replaced = set()
+                commented_idx = {}
+            else:
+                current_section = None
+            out_lines.append(line)
+            continue
+
+        if current_section is not None:
+            edits = section_edits[current_section]
+            active_pats, comment_pats, legacy_pats = section_patterns[current_section]
+
+            if any(pat.match(line) for pat in legacy_pats):
+                continue
+
+            matched_active: str | None = None
+            for toml_key, pat in active_pats.items():
+                if pat.match(line):
+                    matched_active = toml_key
+                    break
+            if matched_active is not None:
+                edit = edits[matched_active]
+                if edit.line is None:
+                    continue
+                if matched_active not in replaced:
+                    out_lines.append(edit.line)
+                    replaced.add(matched_active)
+                    continue
+
+            for toml_key, pat in comment_pats.items():
+                if pat.match(line):
+                    commented_idx.setdefault(toml_key, len(out_lines))
+                    break
+
+        out_lines.append(line)
+
+    if current_section is not None:
+        _flush_section(current_section)
+
+    for section, edits in section_edits.items():
+        if section in seen_sections:
+            continue
+        new_lines = [edit.line for edit in edits.values() if edit.line is not None]
+        if not new_lines:
+            continue
+        if out_lines and out_lines[-1].strip():
+            out_lines.append("")
+        out_lines.append(f"[{section}]")
+        out_lines.extend(new_lines)
+
+    rendered = ("\n".join(out_lines) + "\n") if out_lines else ""
+    try:
+        after_parsed = tomllib.loads(rendered)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Unable to safely update {target}: {exc}") from exc
+
+    if not _toml_values_equal(expected, after_parsed):
+        raise ConfigError(
+            f"Unable to safely update {target} automatically without disturbing existing content."
+        )
+
+    _atomic_write_text(
+        target,
+        rendered,
+        validator=lambda candidate: load_config(config_path=candidate, env={}),
+    )
+    return target
 
 
 def render_config_template(contact: str | None = None) -> str:
