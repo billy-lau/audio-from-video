@@ -23,9 +23,11 @@ from rich.progress import (
 from typer.core import TyperGroup
 
 from audio_from_video import __version__
+from audio_from_video import session as _session
 from audio_from_video.artwork import ArtworkFetcher
 from audio_from_video.binaries import MissingBinaryError, resolve_binaries
 from audio_from_video.cache import CACHE_FILENAME, TTLCache, find_corrupt_backups
+from audio_from_video.cancel import CancelToken
 from audio_from_video.cli.doctor import run_doctor
 from audio_from_video.cli.prompts import make_rich_prompt_callbacks, prompt_mb_contact
 from audio_from_video.cli.rendering import render_plan_table, render_summary
@@ -54,12 +56,12 @@ from audio_from_video.models import ConflictPolicy, ManualOverrides, PlanAction
 from audio_from_video.planner import (
     PlanValidationError,
     PromptCallbacks,
-    build_plan,
     validate_manual_overrides,
 )
 from audio_from_video.providers.itunes import ITunesClient
 from audio_from_video.providers.musicbrainz import MusicBrainzClient
-from audio_from_video.runner import execute_plan, write_json_report
+from audio_from_video.runner import write_json_report
+from audio_from_video.session import RunOptions, RunSession
 
 logger = logging.getLogger(__name__)
 
@@ -125,11 +127,7 @@ def _create_online_services(
     cache: TTLCache,
 ) -> tuple[MusicBrainzClient, ITunesClient, TrackResolver, ArtworkFetcher]:
     """Construct online MusicBrainz, iTunes, TrackResolver, and ArtworkFetcher services."""
-    mb_client = MusicBrainzClient(user_agent, cache=cache)
-    itunes_client = ITunesClient(cache=cache)
-    resolver = TrackResolver(mb_client, itunes_client, cfg.matching)
-    artwork_fetcher = ArtworkFetcher(mb_client, itunes_client, cache=cache)
-    return mb_client, itunes_client, resolver, artwork_fetcher
+    return _session.create_online_services(user_agent, cfg, cache)
 
 
 @app.callback()
@@ -297,7 +295,7 @@ def extract_command(
         cfg = load_config()
         if quality is not None:
             parse_quality(quality)
-        worker_jobs = validate_jobs(jobs if jobs is not None else cfg.execution.jobs)
+        validate_jobs(jobs if jobs is not None else cfg.execution.jobs)
     except ConfigError as exc:
         err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
         raise typer.Exit(code=2) from exc
@@ -389,24 +387,37 @@ def extract_command(
             err_console.print(f"[red]Error:[/red] {escape(str(exc))}")
             raise typer.Exit(code=2) from exc
 
-    effective_flat = cfg.output.flat if flat is None else flat
-    effective_conflict = cfg.output.on_conflict if on_conflict is None else on_conflict
+    options = RunOptions(
+        inputs=tuple(inputs),
+        recursive=recursive,
+        output_dir=output_dir,
+        offline=offline,
+        always_prompt=always_prompt,
+        keep_native_missing=keep_native_missing,
+        quality=quality,
+        reencode=reencode,
+        normalize=normalize,
+        no_artwork=no_artwork,
+        flat=flat,
+        on_conflict=on_conflict,
+        jobs=jobs,
+        fail_fast=fail_fast,
+        lang=lang,
+        stream=stream,
+        overrides=overrides,
+    )
 
-    cache: TTLCache | None = None
-    mb_client: MusicBrainzClient | None = None
-    itunes_client: ITunesClient | None = None
-    resolver: TrackResolver | None = None
-    artwork_fetcher: ArtworkFetcher | None = None
-
-    try:
-        if not offline:
-            assert user_agent is not None
-            cache = TTLCache.open_default(default_cache_dir())
-            if cache.warning and not quiet:
-                err_console.print(f"[yellow]Warning:[/yellow] {escape(cache.warning)}")
-            mb_client, itunes_client, resolver, artwork_fetcher = _create_online_services(
-                user_agent, cfg, cache
-            )
+    with RunSession.open(
+        options,
+        cfg,
+        binaries,
+        token=CancelToken(),
+        user_agent=user_agent,
+        cache_dir=default_cache_dir(),
+        services_factory=_create_online_services,
+    ) as session:
+        if session.cache_warning and not quiet:
+            err_console.print(f"[yellow]Warning:[/yellow] {escape(session.cache_warning)}")
 
         prompt_callbacks: PromptCallbacks | None = None
         if not effective_non_interactive:
@@ -441,13 +452,8 @@ def extract_command(
             )
 
         def _stage1_stats() -> str:
-            hits = (
-                (cache.hits if cache else 0)
-                + (mb_client.memo_hits if mb_client else 0)
-                + (itunes_client.memo_hits if itunes_client else 0)
-            )
-            mb_calls = mb_client.fetcher.request_count if mb_client else 0
-            return f"cache: {hits} | MB: {mb_calls}"
+            stats = session.lookup_stats()
+            return f"cache: {stats.cache_hits} | MB: {stats.mb_requests}"
 
         def _on_probe_progress(idx: int, total_items: int, media_input: object) -> None:
             if stage1_progress is not None and stage1_task_id is not None:
@@ -475,24 +481,11 @@ def extract_command(
                 stage1_progress.stop()
 
         try:
-            plan_items = build_plan(
+            plan_items = session.build_plan(
                 media_inputs,
                 output_root=output_root,
-                ffprobe_path=binaries.ffprobe,
-                config=cfg,
-                resolver=resolver,
-                overrides=overrides,
-                quality_override=quality,
-                reencode=reencode,
-                normalize=normalize,
-                flat=effective_flat,
-                on_conflict=effective_conflict,
-                lang=lang,
-                stream_index=stream,
-                always_prompt=always_prompt,
-                non_interactive=effective_non_interactive,
-                keep_native_missing=keep_native_missing,
                 prompt_callbacks=prompt_callbacks,
+                non_interactive=effective_non_interactive,
                 on_item_planned=_on_probe_progress if stage1_progress is not None else None,
                 on_lookup_progress=_on_lookup_progress if stage1_progress is not None else None,
                 on_lookup_complete=_on_lookup_complete if stage1_progress is not None else None,
@@ -527,17 +520,7 @@ def extract_command(
             raise typer.Exit(code=1 if has_fail else 0)
 
         if quiet:
-            summary = execute_plan(
-                plan_items,
-                ffmpeg_path=binaries.ffmpeg,
-                output_root=output_root,
-                jobs=worker_jobs,
-                flat=effective_flat,
-                on_conflict=effective_conflict,
-                no_artwork=no_artwork,
-                fail_fast=fail_fast,
-                artwork_fetcher=artwork_fetcher,
-            )
+            summary = session.execute(plan_items, output_root=output_root)
         else:
             with Progress(
                 SpinnerColumn(),
@@ -552,16 +535,9 @@ def extract_command(
                 def _advance(_res: object, _done: int, _total: int) -> None:
                     progress.advance(task_id, 1)
 
-                summary = execute_plan(
+                summary = session.execute(
                     plan_items,
-                    ffmpeg_path=binaries.ffmpeg,
                     output_root=output_root,
-                    jobs=worker_jobs,
-                    flat=effective_flat,
-                    on_conflict=effective_conflict,
-                    no_artwork=no_artwork,
-                    fail_fast=fail_fast,
-                    artwork_fetcher=artwork_fetcher,
                     on_result=_advance,
                 )
 
@@ -572,15 +548,6 @@ def extract_command(
             render_summary(summary, console=out_console)
 
         raise typer.Exit(code=summary.exit_code)
-    finally:
-        if mb_client is not None:
-            mb_client.fetcher.close()
-            mb_client.art_fetcher.close()
-        if itunes_client is not None:
-            itunes_client.fetcher.close()
-            itunes_client.art_fetcher.close()
-        if cache is not None:
-            cache.close()
 
 
 @app.command(name="doctor")
