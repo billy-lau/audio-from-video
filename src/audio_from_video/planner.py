@@ -12,7 +12,7 @@ from pathlib import Path
 from audio_from_video.cancel import CancelToken
 from audio_from_video.config import AppConfig, parse_quality
 from audio_from_video.discovery import VIDEO_EXTENSIONS
-from audio_from_video.events import EventSink
+from audio_from_video.events import EventSink, TrackEvent, TrackStage
 from audio_from_video.extractor import plan_extraction
 from audio_from_video.formatting import (
     UNMATCHED_DIR,
@@ -313,6 +313,8 @@ def _resolve_non_latin_aliases(
     overrides: ManualOverrides,
     session: _AliasSession,
     callbacks: PromptCallbacks | None,
+    cancel: CancelToken | None = None,
+    on_before_prompt: Callable[[], None] | None = None,
 ) -> None:
     """Apply remembered aliases and optionally prompt for missing non-Latin English aliases."""
     if metadata.match_status not in (MatchStatus.EXACT, MatchStatus.PARTIAL):
@@ -376,7 +378,15 @@ def _resolve_non_latin_aliases(
         ):
             return raw_value
 
+        if cancel is not None:
+            cancel.raise_if_cancelled()
+        if on_before_prompt is not None:
+            on_before_prompt()
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         resp = prompt_fn(media_input, field_kind, cleaned, scope_label)
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         if resp.action == AliasAction.USE_ENGLISH and resp.english_value:
             eng = resp.english_value.strip()
             if eng:
@@ -465,12 +475,25 @@ def _resolve_online_entry(
     non_interactive: bool,
     callbacks: PromptCallbacks | None,
     prompt_session: _MatchPromptSession | None = None,
+    cancel: CancelToken | None = None,
+    on_before_prompt: Callable[[], None] | None = None,
 ) -> tuple[TrackMetadata | None, Candidate | None, list[Candidate], PlanAction | None, str | None]:
     """Resolve one online MatchResult via auto-accept, interactive prompt, or safe fallback."""
     assert entry.hints is not None
     assert entry.probe is not None
     session = prompt_session if prompt_session is not None else _MatchPromptSession()
 
+    def _check_cancel() -> None:
+        if cancel is not None:
+            cancel.raise_if_cancelled()
+
+    def _before_prompt() -> None:
+        _check_cancel()
+        if on_before_prompt is not None:
+            on_before_prompt()
+        _check_cancel()
+
+    _check_cancel()
     entry.warnings.extend(match_result.warnings)
     top_candidates = match_result.top_candidates
 
@@ -496,6 +519,7 @@ def _resolve_online_entry(
                 "the remaining uncertain tracks use offline fallback metadata without prompting "
                 "(use --artist, --album, or --title to pin tags)."
             )
+            _check_cancel()
     if can_prompt and session.fallback_all:
         can_prompt = False
 
@@ -508,12 +532,14 @@ def _resolve_online_entry(
         assert callbacks is not None and callbacks.resolve_match is not None
         current_match = match_result
         while True:
+            _before_prompt()
             resp = callbacks.resolve_match(
                 entry.media_input,
                 entry.hints,
                 current_match,
                 always_prompt,
             )
+            _check_cancel()
             if resp.action == CandidateAction.MANUAL_SEARCH:
                 searched = resolver.manual_search(
                     title=resp.search_title or "",
@@ -521,12 +547,14 @@ def _resolve_online_entry(
                     album=resp.search_album,
                     duration_seconds=entry.probe.duration_seconds,
                 )
+                _check_cancel()
                 entry.warnings.extend(searched.warnings)
                 if searched.top_candidates:
                     current_match = searched
                     top_candidates = current_match.top_candidates
                 else:
                     _notify("Manual search found no candidates; showing the previous candidates.")
+                    _check_cancel()
                 continue
 
             if resp.action == CandidateAction.SKIP_TRACK:
@@ -558,9 +586,11 @@ def _resolve_online_entry(
                             if picked.chosen_release in editions
                             else editions[0]
                         )
+                        _before_prompt()
                         chosen_ed = callbacks.select_edition(
                             entry.media_input, picked, editions, default_ed
                         )
+                        _check_cancel()
                         if chosen_ed != picked.chosen_release:
                             picked = replace(picked, chosen_release=chosen_ed)
                             explicit_edition = True
@@ -581,6 +611,7 @@ def _resolve_online_entry(
                     disc_hint=entry.hints.disc_number,
                     allow_edition_recheck=not explicit_edition,
                 )
+                _check_cancel()
                 return enriched_meta, enriched_cand, top_candidates, None, None
 
             # Defensive fallback if a custom callback returns an incomplete response.
@@ -637,6 +668,41 @@ def _compute_folder_unpadded(media_inputs: Sequence[MediaInput]) -> dict[Path, s
     return folder_confirmed_unpadded
 
 
+def _call_resolve_batch(
+    resolver: TrackResolver,
+    batch_items: Sequence[BatchItem],
+    *,
+    on_progress: Callable[[int, int, str], None] | None,
+    cancel: CancelToken | None,
+    on_item_started: Callable[[int], None] | None,
+) -> list[MatchResult]:
+    """Invoke ``resolver.resolve_batch``, forwarding only active cancel and event hooks.
+
+    Omitting unset optional keyword arguments keeps compatibility with legacy test
+    fakes whose ``resolve_batch`` accepts only ``on_progress``.
+    """
+    if cancel is not None and on_item_started is not None:
+        return resolver.resolve_batch(
+            batch_items,
+            on_progress=on_progress,
+            cancel=cancel,
+            on_item_started=on_item_started,
+        )
+    if cancel is not None:
+        return resolver.resolve_batch(
+            batch_items,
+            on_progress=on_progress,
+            cancel=cancel,
+        )
+    if on_item_started is not None:
+        return resolver.resolve_batch(
+            batch_items,
+            on_progress=on_progress,
+            on_item_started=on_item_started,
+        )
+    return resolver.resolve_batch(batch_items, on_progress=on_progress)
+
+
 def build_plan(
     media_inputs: Sequence[MediaInput],
     *,
@@ -664,7 +730,27 @@ def build_plan(
     on_event: EventSink | None = None,
 ) -> list[PlanItem]:
     """Build complete Stage 1 PlanItems (supports both online and offline planning)."""
-    _ = cancel, on_event
+
+    def _check_cancel() -> None:
+        if cancel is not None:
+            cancel.raise_if_cancelled()
+
+    def _emit(event: TrackEvent) -> None:
+        if on_event is not None:
+            on_event(event)
+
+    def _awaiting_emitter(index: int, source: Path) -> Callable[[], None]:
+        def _emit_awaiting() -> None:
+            _emit(
+                TrackEvent(
+                    index=index,
+                    source=source,
+                    stage=TrackStage.AWAITING_INPUT,
+                )
+            )
+
+        return _emit_awaiting
+
     active_overrides = overrides or ManualOverrides()
     validate_manual_overrides(media_inputs, active_overrides)
 
@@ -672,6 +758,7 @@ def build_plan(
     quality_spec: QualitySpec = parse_quality(
         quality_override if quality_override is not None else config.audio.quality
     )
+    _check_cancel()
     use_flat = config.output.flat if flat is None else flat
     conflict_policy = config.output.on_conflict if on_conflict is None else on_conflict
     rel_budget, long_root_warning = compute_relative_path_budget(output_root)
@@ -679,6 +766,7 @@ def build_plan(
         logger.warning("%s", long_root_warning, extra={"afv_rendered": True})
         if on_batch_warning is not None:
             on_batch_warning(long_root_warning)
+            _check_cancel()
 
     folder_confirmed_unpadded = _compute_folder_unpadded(media_inputs)
     total = len(media_inputs)
@@ -697,8 +785,18 @@ def build_plan(
     )
 
     for idx, media_input in enumerate(media_inputs, start=1):
+        _check_cancel()
         if on_item_planned is not None:
             on_item_planned(idx, total, media_input)
+            _check_cancel()
+        _emit(
+            TrackEvent(
+                index=idx - 1,
+                source=media_input.path,
+                stage=TrackStage.PROBING,
+            )
+        )
+        _check_cancel()
 
         try:
             probe = probe_media(ffprobe_path, media_input.path)
@@ -785,14 +883,39 @@ def build_plan(
                 )
             )
 
+    _check_cancel()
     match_by_entry: dict[int, MatchResult] = {}
     if resolver is not None and batch_items:
-        resolved_batch = resolver.resolve_batch(batch_items, on_progress=on_lookup_progress)
+
+        def _on_item_started(batch_idx: int) -> None:
+            if not 0 <= batch_idx < len(online_indices):
+                raise IndexError(
+                    f"resolve_batch item index {batch_idx} out of range for "
+                    f"{len(online_indices)} items"
+                )
+            input_idx = online_indices[batch_idx]
+            _emit(
+                TrackEvent(
+                    index=input_idx,
+                    source=media_inputs[input_idx].path,
+                    stage=TrackStage.LOOKUP,
+                )
+            )
+
+        resolved_batch = _call_resolve_batch(
+            resolver,
+            batch_items,
+            on_progress=on_lookup_progress,
+            cancel=cancel,
+            on_item_started=_on_item_started if on_event is not None else None,
+        )
+        _check_cancel()
         for entry_idx, match_res in zip(online_indices, resolved_batch, strict=True):
             match_by_entry[entry_idx] = match_res
 
     if on_lookup_complete is not None:
         on_lookup_complete()
+        _check_cancel()
 
     # -- Stage 1b & 1c: Interactive prompts, alias resolution, & path allocation ----
     alias_session = _AliasSession(
@@ -811,6 +934,7 @@ def build_plan(
     plan_items: list[PlanItem] = []
 
     for entry_idx, entry in enumerate(probed_entries):
+        _check_cancel()
         if entry.terminal_action is not None:
             plan_items.append(
                 PlanItem(
@@ -826,14 +950,22 @@ def build_plan(
         assert entry.probe is not None
         assert entry.hints is not None
 
+        emit_awaiting = (
+            _awaiting_emitter(entry_idx, entry.media_input.path) if on_event is not None else None
+        )
+
         if entry.needs_stream_choice:
             assert prompt_callbacks is not None and prompt_callbacks.select_stream is not None
             default_stream = select_audio_stream(entry.probe.audio_streams)
             non_commentary = [s for s in entry.probe.audio_streams if not s.is_commentary]
             pool = non_commentary or entry.probe.audio_streams
+            if emit_awaiting is not None:
+                emit_awaiting()
+                _check_cancel()
             entry.selected_stream = prompt_callbacks.select_stream(
                 entry.media_input, pool, default_stream
             )
+            _check_cancel()
         assert entry.selected_stream is not None
 
         chosen_candidate: Candidate | None = None
@@ -853,6 +985,8 @@ def build_plan(
                     non_interactive=non_interactive,
                     callbacks=prompt_callbacks,
                     prompt_session=match_session,
+                    cancel=cancel,
+                    on_before_prompt=emit_awaiting,
                 )
             )
             if override_action == PlanAction.SKIP_USER:
@@ -886,6 +1020,8 @@ def build_plan(
             overrides=active_overrides,
             session=alias_session,
             callbacks=prompt_callbacks,
+            cancel=cancel,
+            on_before_prompt=emit_awaiting,
         )
 
         extraction = plan_extraction(
@@ -943,6 +1079,19 @@ def build_plan(
                 conflict_note=conflict_note,
             )
         )
+
+    _check_cancel()
+    if on_event is not None:
+        for item_idx, item in enumerate(plan_items):
+            on_event(
+                TrackEvent(
+                    index=item_idx,
+                    source=item.media_input.path,
+                    stage=TrackStage.PLANNED,
+                    action=item.action,
+                    warnings=tuple(item.warnings),
+                )
+            )
 
     return plan_items
 
