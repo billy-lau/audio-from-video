@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import ast
 import inspect
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -73,7 +76,12 @@ from audio_from_video.gui.screens._common import (
     open_ui_settings,
     resolve_existing_directory,
 )
-from audio_from_video.gui.screens.inputs import INVALID_CONFIG_BANNER_TEXT
+from audio_from_video.gui.screens.inputs import (
+    INVALID_CONFIG_BANNER_TEXT,
+    INVALID_ENV_CONFIG_BANNER_TEXT,
+    INVALID_UNKNOWN_CONFIG_BANNER_TEXT,
+    OFFLINE_SWITCH_NOTICE_TEXT,
+)
 from audio_from_video.gui.screens.run import CANCELLING_MESSAGE
 from audio_from_video.gui.screens.settings import LOG_LEVEL_KEY, STARTUP_OFFLINE_KEY
 from audio_from_video.models import (
@@ -2841,9 +2849,14 @@ def test_inputs_screen_use_offline_only_from_setup_avoids_online_loop(
 
 def test_inputs_screen_use_offline_only_from_setup_with_invalid_config(
     qtbot,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """M2 + L3: invalid-config bounce to SETUP then offline return flips to Offline with banner."""
+    bad_cfg = tmp_path / "broken_config.toml"
+    bad_cfg.write_text('[audio]\nquality = "321k"\n', encoding="utf-8")
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(bad_cfg))
+
     ctrl = FakeController(state=ControllerState.PREFLIGHT, config=None, offline_default=False)
     screen = InputsScreen(ctrl)
     qtbot.addWidget(screen)
@@ -2855,6 +2868,7 @@ def test_inputs_screen_use_offline_only_from_setup_with_invalid_config(
     assert screen.offline_radio.isChecked()
     assert not screen.config_warning_banner.isHidden()
     assert screen.config_warning_banner.text == INVALID_CONFIG_BANNER_TEXT
+    assert screen.mode_notice_banner.isHidden()
 
     # Edit options, toggle back to Online, add a file, and bounce to SETUP.
     video = tmp_path / "song.mp4"
@@ -2875,6 +2889,10 @@ def test_inputs_screen_use_offline_only_from_setup_with_invalid_config(
     assert screen.flat_checkbox.isChecked()
     assert screen.jobs_spin.value() == 3
     assert not screen.config_warning_banner.isHidden()
+    assert screen.config_warning_banner.text == INVALID_CONFIG_BANNER_TEXT
+    assert not screen.mode_notice_banner.isHidden()
+    assert screen.mode_notice_banner.icon_name == "status_info"
+    assert screen.mode_notice_banner.text == OFFLINE_SWITCH_NOTICE_TEXT
 
 
 def test_inputs_screen_invalid_config_banner_lifecycle(
@@ -3386,7 +3404,9 @@ def test_open_local_path_opt_in_fallback_and_relative_path_safety(
     qtbot.addWidget(planning_screen)
     planning_screen.open_log_button.click()
     assert opened == []
-    assert "does not exist yet" in planning_screen.notice_banner.text.casefold()
+    assert planning_screen.notice_banner.isHidden()
+    assert not planning_screen.log_feedback_label.isHidden()
+    assert "does not exist yet" in planning_screen.log_feedback_label.text.casefold()
 
     summary_screen = SummaryScreen(ctrl)
     qtbot.addWidget(summary_screen)
@@ -3497,3 +3517,610 @@ def test_svg_icon_engine_caches_renderer_and_pixmaps_across_repaints(
         assert pixmap_count >= 5
     finally:
         clear_icon_caches()
+
+
+# ---------------------------------------------------------------------------
+# Final polish regression tests (items 1, 2, 3, and 5; silent-offline nit)
+# ---------------------------------------------------------------------------
+
+
+def test_inputs_screen_settings_saved_preserves_per_run_options_and_mode(
+    qtbot,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Item 1: UI-only, offline-toggle, contact, and binary saves preserve per-run edits."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text(
+        "[audio]\n"
+        'quality = "320k"\n\n'
+        "[execution]\n"
+        "jobs = 4\n\n"
+        "[output]\n"
+        "flat = false\n"
+        'on_conflict = "skip"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(cfg_path))
+
+    def _base_config() -> AppConfig:
+        cfg = AppConfig(config_path=cfg_path)
+        cfg.audio.quality = "320k"
+        cfg.output.flat = False
+        cfg.output.on_conflict = ConflictPolicy.SKIP
+        cfg.execution.jobs = 4
+        return cfg
+
+    # Reviewer repro with FakeController: edit (v0, jobs=1, Offline), then save log/level.
+    ctrl = FakeController(
+        state=ControllerState.INPUTS, config=_base_config(), offline_default=False
+    )
+    screen = InputsScreen(ctrl)
+    qtbot.addWidget(screen)
+
+    clip = tmp_path / "demo.mp4"
+    clip.write_bytes(b"")
+    screen.add_paths([clip])
+    screen.quality_combo.setCurrentText("v0")
+    screen.jobs_spin.setValue(1)
+    screen.flat_checkbox.setChecked(True)
+    rename_idx = screen.conflict_combo.findData(ConflictPolicy.RENAME.value)
+    assert rename_idx >= 0
+    screen.conflict_combo.setCurrentIndex(rename_idx)
+    screen.offline_radio.setChecked(True)
+    screen.reencode_checkbox.setChecked(True)
+    screen.normalize_checkbox.setChecked(True)
+    screen.artwork_checkbox.setChecked(False)
+    screen.lang_edit.setText("jpn")
+    screen.stream_spin.setValue(2)
+    screen.fail_fast_checkbox.setChecked(True)
+    screen.artist_edit.setText("Pinned Artist")
+
+    # 1. UI-only save (e.g., changing log/level): keep v0, jobs=1, flat, rename, and Offline.
+    ctrl.settings_saved.emit(_base_config())
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.jobs_spin.value() == 1
+    assert screen.flat_checkbox.isChecked()
+    assert screen.conflict_combo.currentData() == ConflictPolicy.RENAME.value
+    assert screen.offline_radio.isChecked()
+    assert screen.reencode_checkbox.isChecked()
+    assert screen.normalize_checkbox.isChecked()
+    assert not screen.artwork_checkbox.isChecked()
+    assert screen.lang_edit.text() == "jpn"
+    assert screen.stream_spin.value() == 2
+    assert screen.fail_fast_checkbox.isChecked()
+    assert screen.artist_edit.text() == "Pinned Artist"
+
+    # 2. Toggle "Start in offline mode" False -> True while Offline is already picked.
+    ctrl.set_offline_default(True)
+    ctrl.settings_saved.emit(_base_config())
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.jobs_spin.value() == 1
+    assert screen.flat_checkbox.isChecked()
+    assert screen.conflict_combo.currentData() == ConflictPolicy.RENAME.value
+    assert screen.offline_radio.isChecked()
+
+    # 3. Unrelated config keys (contact and binaries.*) keep every per-run edit intact.
+    contact_cfg = _base_config()
+    contact_cfg.musicbrainz.contact = "relay@duck.com"
+    ctrl.set_config(contact_cfg)
+    ctrl.settings_saved.emit(contact_cfg)
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.jobs_spin.value() == 1
+    assert screen.offline_radio.isChecked()
+
+    bin_cfg = _base_config()
+    bin_cfg.musicbrainz.contact = "relay@duck.com"
+    bin_cfg.binaries.ffmpeg_path = "/custom/ffmpeg"
+    ctrl.set_config(bin_cfg)
+    ctrl.settings_saved.emit(bin_cfg)
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.jobs_spin.value() == 1
+    assert screen.offline_radio.isChecked()
+
+    # 4. Real config default change (audio.quality 320k -> 192k) reloads defaults cleanly
+    # while still respecting the unchanged offline_default toggle.
+    quality_cfg = _base_config()
+    quality_cfg.audio.quality = "192k"
+    ctrl.set_config(quality_cfg)
+    ctrl.settings_saved.emit(quality_cfg)
+    assert screen.quality_combo.currentText() == "192k"
+    assert screen.jobs_spin.value() == 4
+    assert not screen.flat_checkbox.isChecked()
+    assert screen.offline_radio.isChecked()
+
+    # 5. Online user toggles "Start in offline mode" False -> True: flips to Offline,
+    # keeping edited v0 and jobs=1 intact (and toggling True -> False flips back to Online).
+    ctrl_online = FakeController(
+        state=ControllerState.INPUTS,
+        config=_base_config(),
+        offline_default=False,
+    )
+    online_screen = InputsScreen(ctrl_online)
+    qtbot.addWidget(online_screen)
+    online_screen.quality_combo.setCurrentText("v0")
+    online_screen.jobs_spin.setValue(1)
+    assert online_screen.online_radio.isChecked()
+
+    ctrl_online.set_offline_default(True)
+    ctrl_online.settings_saved.emit(_base_config())
+    assert online_screen.offline_radio.isChecked()
+    assert online_screen.quality_combo.currentText() == "v0"
+    assert online_screen.jobs_spin.value() == 1
+
+    ctrl_online.set_offline_default(False)
+    ctrl_online.settings_saved.emit(_base_config())
+    assert online_screen.online_radio.isChecked()
+    assert online_screen.quality_combo.currentText() == "v0"
+    assert online_screen.jobs_spin.value() == 1
+
+    # 6. Changing audio.quality with offline_default unchanged keeps manual Offline toggle.
+    online_screen.offline_radio.setChecked(True)
+    new_quality_cfg = _base_config()
+    new_quality_cfg.audio.quality = "192k"
+    ctrl_online.set_config(new_quality_cfg)
+    ctrl_online.settings_saved.emit(new_quality_cfg)
+    assert online_screen.quality_combo.currentText() == "192k"
+    assert online_screen.offline_radio.isChecked()
+
+    # 7. Real RunController + SettingsScreen round-trip (QSettings log/level and offline toggle).
+    real_ctrl = RunController(cache_dir=tmp_path / "cache")
+    real_ctrl._config = load_config(config_path=cfg_path, env={})
+    real_ctrl._state = ControllerState.INPUTS
+    real_inputs = InputsScreen(real_ctrl)
+    real_settings = SettingsScreen(real_ctrl)
+    qtbot.addWidget(real_inputs)
+    qtbot.addWidget(real_settings)
+
+    real_inputs.quality_combo.setCurrentText("v0")
+    real_inputs.jobs_spin.setValue(1)
+    real_inputs.offline_radio.setChecked(True)
+
+    # Save ONLY log/level = DEBUG via SettingsScreen -> real RunController.save_settings({}).
+    real_settings.log_level_combo.setCurrentText("DEBUG")
+    real_settings.save_button.click()
+    assert real_inputs.quality_combo.currentText() == "v0"
+    assert real_inputs.jobs_spin.value() == 1
+    assert real_inputs.offline_radio.isChecked()
+
+    # Toggle ONLY startup/offline False -> True via SettingsScreen (Online -> Offline, keeps v0/1).
+    real_inputs.online_radio.setChecked(True)
+    real_settings.startup_offline_checkbox.setChecked(True)
+    real_settings.save_button.click()
+    assert real_inputs.offline_radio.isChecked()
+    assert real_inputs.quality_combo.currentText() == "v0"
+    assert real_inputs.jobs_spin.value() == 1
+
+    # Deferred double-emit path: save only musicbrainz.contact + toggle startup/offline off.
+    real_settings.contact_edit.setText("relay@duck.com")
+    real_settings.startup_offline_checkbox.setChecked(False)
+    real_settings.save_button.click()
+    assert real_inputs.online_radio.isChecked()
+    assert real_inputs.quality_combo.currentText() == "v0"
+    assert real_inputs.jobs_spin.value() == 1
+
+    # With invalid config (config=None), UI-only save still preserves edited per-run widgets.
+    inv_ctrl = FakeController(state=ControllerState.INPUTS, config=None, offline_default=True)
+    inv_screen = InputsScreen(inv_ctrl)
+    qtbot.addWidget(inv_screen)
+    inv_screen.quality_combo.setCurrentText("v0")
+    inv_screen.jobs_spin.setValue(1)
+    inv_screen.online_radio.setChecked(True)
+    inv_ctrl.settings_saved.emit(None)
+    assert inv_screen.quality_combo.currentText() == "v0"
+    assert inv_screen.jobs_spin.value() == 1
+    assert inv_screen.online_radio.isChecked()
+
+
+def test_inputs_screen_silent_offline_switch_notice_banner(
+    qtbot,
+    tmp_path: Path,
+) -> None:
+    """Nit: show a brief, non-masking info notice when SETUP -> INPUTS flips Online to Offline."""
+    cfg = AppConfig()
+    cfg.audio.quality = "320k"
+    cfg.execution.jobs = 4
+
+    ctrl = FakeController(state=ControllerState.PREFLIGHT, config=cfg, offline_default=True)
+    screen = InputsScreen(ctrl)
+    qtbot.addWidget(screen)
+
+    # Initial PREFLIGHT -> SETUP -> INPUTS entry must NOT show the switch notice.
+    ctrl.set_state(ControllerState.SETUP)
+    ctrl.set_state(ControllerState.INPUTS)
+    assert screen.offline_radio.isChecked()
+    assert screen.mode_notice_banner.isHidden()
+
+    # User switches to Online, customizes options, and hits a SETUP detour (e.g., missing ffmpeg).
+    clip = tmp_path / "video.mp4"
+    clip.write_bytes(b"")
+    screen.add_paths([clip])
+    screen.online_radio.setChecked(True)
+    screen.quality_combo.setCurrentText("v0")
+    screen.jobs_spin.setValue(1)
+
+    ctrl.emit_setup_redirect("missing_ffmpeg", "ffmpeg is missing.")
+    # Fixing ffmpeg leaves offline_default=True and returns to INPUTS -> flips Online -> Offline.
+    fixed_cfg = AppConfig()
+    fixed_cfg.audio.quality = "320k"
+    fixed_cfg.execution.jobs = 4
+    fixed_cfg.binaries.ffmpeg_path = "/custom/bin/ffmpeg"
+    ctrl.set_config(fixed_cfg)
+    ctrl.set_state(ControllerState.INPUTS)
+
+    assert screen.offline_radio.isChecked()
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.jobs_spin.value() == 1
+    assert screen.error_banner.isHidden()
+    assert not screen.mode_notice_banner.isHidden()
+    assert screen.mode_notice_banner.icon_name == "status_info"
+    assert screen.mode_notice_banner.text == OFFLINE_SWITCH_NOTICE_TEXT
+
+    # Manual mode toggle back to Online clears the notice.
+    screen.online_radio.setChecked(True)
+    assert screen.mode_notice_banner.isHidden()
+
+    # Second bounce shows notice again; editing a control clears it.
+    ctrl.emit_setup_redirect("missing_ffmpeg", "ffmpeg is missing.")
+    ctrl.set_state(ControllerState.INPUTS)
+    assert not screen.mode_notice_banner.isHidden()
+    screen.jobs_spin.setValue(2)
+    assert screen.mode_notice_banner.isHidden()
+
+    # Third bounce: input_error never gets masked by the notice banner.
+    screen.online_radio.setChecked(True)
+    ctrl.emit_setup_redirect("missing_contact", "contact missing.")
+    ctrl.set_state(ControllerState.INPUTS)
+    assert not screen.mode_notice_banner.isHidden()
+    ctrl.input_error.emit("no_inputs", "Empty folder.")
+    assert not screen.error_banner.isHidden()
+    assert screen.mode_notice_banner.isHidden()
+
+    # Fourth bounce: clicking Scan clears the notice.
+    screen.online_radio.setChecked(True)
+    ctrl.emit_setup_redirect("missing_contact", "contact missing.")
+    ctrl.set_state(ControllerState.INPUTS)
+    assert not screen.mode_notice_banner.isHidden()
+    screen.scan_button.click()
+    assert screen.mode_notice_banner.isHidden()
+
+    # When already in Offline mode before detour, no notice appears on return.
+    ctrl.emit_setup_redirect("missing_ffmpeg", "ffmpeg missing.")
+    ctrl.set_state(ControllerState.INPUTS)
+    assert screen.offline_radio.isChecked()
+    assert screen.mode_notice_banner.isHidden()
+
+    # Returning via save_contact (offline_default=False) keeps Online and shows no notice.
+    screen.online_radio.setChecked(True)
+    ctrl.emit_setup_redirect("missing_contact", "contact missing.")
+    ctrl.set_offline_default(False)
+    ctrl.set_state(ControllerState.INPUTS)
+    assert screen.online_radio.isChecked()
+    assert screen.mode_notice_banner.isHidden()
+
+
+def test_invalid_env_override_banners_do_not_blame_config_toml(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Item 2: AFV_* env errors are clearly attributed without falsely blaming config.toml."""
+    import audio_from_video.gui.screens.inputs as inputs_mod
+    import audio_from_video.gui.screens.settings as settings_mod
+
+    # 1. Missing config.toml + invalid AFV_MB_CONTACT.
+    missing_cfg = tmp_path / "missing_config.toml"
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(missing_cfg))
+    monkeypatch.setenv("AFV_MB_CONTACT", "not-an-email")
+
+    ctrl_missing = FakeController(state=ControllerState.PREFLIGHT, config=None)
+    inputs_missing = InputsScreen(ctrl_missing)
+    settings_missing = SettingsScreen(ctrl_missing)
+    qtbot.addWidget(inputs_missing)
+    qtbot.addWidget(settings_missing)
+
+    ctrl_missing.set_state(ControllerState.SETUP)
+    ctrl_missing.set_offline_default(True)
+    ctrl_missing.set_state(ControllerState.INPUTS)
+    assert not inputs_missing.config_warning_banner.isHidden()
+    assert inputs_missing.config_warning_banner.icon_name == "status_warn"
+    assert inputs_missing.config_warning_banner.text.startswith(INVALID_ENV_CONFIG_BANNER_TEXT)
+    assert "AFV_MB_CONTACT" in inputs_missing.config_warning_banner.text
+    assert "config.toml" not in inputs_missing.config_warning_banner.text.casefold()
+
+    assert not settings_missing.status_banner.isHidden()
+    assert settings_missing.status_banner.icon_name == "status_warn"
+    assert "AFV_MB_CONTACT" in settings_missing.status_banner.text
+    assert "open config file" not in settings_missing.status_banner.text.casefold()
+    assert not settings_missing.invalid_field_labels["musicbrainz.contact"].isHidden()
+    assert "musicbrainz.contact" in settings_missing.invalid_env_overrides
+
+    # 2. Valid config.toml + invalid AFV_MB_CONTACT (Settings parses file cleanly with env={}).
+    valid_cfg = tmp_path / "valid_config.toml"
+    valid_cfg.write_text(
+        '[audio]\nquality = "192k"\n\n[musicbrainz]\ncontact = "relay@duck.com"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(valid_cfg))
+    monkeypatch.setenv("AFV_MB_CONTACT", "nobody@example.com")
+
+    ctrl_valid = FakeController(state=ControllerState.INPUTS, config=None, offline_default=True)
+    inputs_valid = InputsScreen(ctrl_valid)
+    settings_valid = SettingsScreen(ctrl_valid)
+    qtbot.addWidget(inputs_valid)
+    qtbot.addWidget(settings_valid)
+
+    assert not inputs_valid.config_warning_banner.isHidden()
+    assert inputs_valid.config_warning_banner.text.startswith(INVALID_ENV_CONFIG_BANNER_TEXT)
+    assert "AFV_MB_CONTACT" in inputs_valid.config_warning_banner.text
+    assert "config.toml" not in inputs_valid.config_warning_banner.text.casefold()
+
+    assert not settings_valid.status_banner.isHidden()
+    assert settings_valid.status_banner.icon_name == "status_warn"
+    assert "itself is valid" in settings_valid.status_banner.text
+    assert "AFV_MB_CONTACT" in settings_valid.status_banner.text
+    assert "open config file" not in settings_valid.status_banner.text.casefold()
+    assert settings_valid.save_button.isEnabled()
+    assert settings_valid.collect_updates() == {}
+
+    # A UI-only save while AFV_MB_CONTACT is still invalid keeps the env warning visible.
+    ctrl_valid.settings_saved.emit(None)
+    assert settings_valid.status_banner.icon_name == "status_warn"
+    assert settings_valid.status_banner.text.startswith("Preferences saved.")
+    assert "AFV_MB_CONTACT" in settings_valid.status_banner.text
+
+    # 3. Valid config.toml + invalid AFV_MB_USER_AGENT.
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    monkeypatch.setenv("AFV_MB_USER_AGENT", "Mozilla/5.0 (bad)")
+    ctrl_valid.settings_saved.emit(None)
+    assert "AFV_MB_USER_AGENT" in inputs_valid.config_warning_banner.text
+    assert "config.toml" not in inputs_valid.config_warning_banner.text.casefold()
+    assert "AFV_MB_USER_AGENT" in settings_valid.status_banner.text
+    assert not settings_valid.invalid_field_labels["musicbrainz.user_agent_override"].isHidden()
+    assert settings_valid.invalid_field_labels["musicbrainz.contact"].isHidden()
+
+    # 4. Both broken config.toml AND invalid AFV_MB_CONTACT & AFV_MB_USER_AGENT use Oxford comma.
+    broken_cfg = tmp_path / "broken_config.toml"
+    broken_cfg.write_text('[audio]\nquality = "321k"\n', encoding="utf-8")
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(broken_cfg))
+    monkeypatch.setenv("AFV_MB_CONTACT", "bad")
+    ctrl_both = FakeController(state=ControllerState.INPUTS, config=None, offline_default=True)
+    inputs_both = InputsScreen(ctrl_both)
+    qtbot.addWidget(inputs_both)
+    assert "config.toml, AFV_MB_CONTACT, and AFV_MB_USER_AGENT" in (
+        inputs_both.config_warning_banner.text
+    )
+
+    # 5. Broken config.toml alone preserves exact backward-compatible banner string.
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    monkeypatch.delenv("AFV_MB_USER_AGENT", raising=False)
+    ctrl_file = FakeController(state=ControllerState.INPUTS, config=None, offline_default=True)
+    inputs_file = InputsScreen(ctrl_file)
+    qtbot.addWidget(inputs_file)
+    assert inputs_file.config_warning_banner.text == INVALID_CONFIG_BANNER_TEXT
+
+    # 6. Unable to isolate (no broken file, clean env) uses neutral fallback wording.
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(missing_cfg))
+    ctrl_unknown = FakeController(state=ControllerState.PREFLIGHT, config=None)
+    inputs_unknown = InputsScreen(ctrl_unknown)
+    qtbot.addWidget(inputs_unknown)
+    ctrl_unknown.set_state(ControllerState.SETUP)
+    ctrl_unknown.set_offline_default(True)
+    ctrl_unknown.set_state(ControllerState.INPUTS)
+    assert inputs_unknown.config_warning_banner.text == INVALID_UNKNOWN_CONFIG_BANNER_TEXT
+
+    # 7. Other AFV_* env failure raised by load_config (e.g., AFV_OUTPUT_DIR).
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(valid_cfg))
+
+    def _fail_non_empty_env(*, config_path=None, env=None):
+        if env:
+            raise ConfigError("AFV_OUTPUT_DIR contains an unsupported path.")
+        return load_config(config_path=config_path, env={})
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(inputs_mod, "load_config", _fail_non_empty_env)
+        scoped.setattr(settings_mod, "load_config", _fail_non_empty_env)
+        ctrl_other = FakeController(state=ControllerState.INPUTS, config=None, offline_default=True)
+        inputs_other = InputsScreen(ctrl_other)
+        settings_other = SettingsScreen(ctrl_other)
+        qtbot.addWidget(inputs_other)
+        qtbot.addWidget(settings_other)
+        assert inputs_other.config_warning_banner.text.startswith(INVALID_ENV_CONFIG_BANNER_TEXT)
+        assert "AFV_OUTPUT_DIR" in inputs_other.config_warning_banner.text
+        assert "itself is valid" in settings_other.status_banner.text
+        assert "AFV_OUTPUT_DIR" in settings_other.status_banner.text
+
+    # 8. Unsetting invalid AFV_MB_CONTACT via refresh_env_overrides clears the env warning cleanly,
+    # and restores any underlying config.toml field warning when the file itself is invalid.
+    shadow_cfg = tmp_path / "shadow_config.toml"
+    shadow_cfg.write_text('[musicbrainz]\ncontact = "nobody@example.com"\n', encoding="utf-8")
+    monkeypatch.setenv("AFV_MB_CONTACT", "bad-env-contact")
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(shadow_cfg))
+    settings_shadow = SettingsScreen(FakeController(state=ControllerState.SETUP, config=None))
+    qtbot.addWidget(settings_shadow)
+    assert "AFV_MB_CONTACT" in settings_shadow.invalid_field_labels["musicbrainz.contact"].text
+    assert "bad-env-contact" in settings_shadow.status_banner.text
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    settings_shadow.refresh_env_overrides()
+    assert not settings_shadow.invalid_field_labels["musicbrainz.contact"].isHidden()
+    assert "AFV_MB_CONTACT" not in settings_shadow.invalid_field_labels["musicbrainz.contact"].text
+    assert settings_shadow.invalid_env_overrides == {}
+
+    # On a valid config file, unsetting AFV_MB_CONTACT clears the warning banner completely.
+    settings_clear = SettingsScreen(FakeController(state=ControllerState.SETUP, config=None))
+    qtbot.addWidget(settings_clear)
+    monkeypatch.setenv("AFV_MB_CONTACT", "bad-env-contact")
+    settings_clear.load_from_config(None, config_path=valid_cfg)
+    settings_clear.refresh_env_overrides()
+    assert not settings_clear.status_banner.isHidden()
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    settings_clear.refresh_env_overrides(env={})
+    assert settings_clear.status_banner.isHidden()
+    assert settings_clear.invalid_field_labels["musicbrainz.contact"].isHidden()
+
+    # 9. Recovery with valid config clears warning banners and inline labels.
+    recovered = AppConfig(config_path=valid_cfg)
+    ctrl_valid.set_config(recovered)
+    ctrl_valid.settings_saved.emit(recovered)
+    assert inputs_valid.config_warning_banner.isHidden()
+    assert settings_valid.invalid_field_labels["musicbrainz.contact"].isHidden()
+    assert settings_valid.invalid_field_labels["musicbrainz.user_agent_override"].isHidden()
+    assert settings_valid.status_banner.text == "Settings saved."
+
+
+def test_planning_screen_open_log_preserves_notices_and_clears_on_success_and_reset(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Item 3: Open log folder errors use log_feedback_label without wiping notice_banner."""
+    import audio_from_video.gui.screens.planning as planning_mod
+
+    ctrl = FakeController(state=ControllerState.PLANNING)
+    screen = PlanningScreen(ctrl)
+    qtbot.addWidget(screen)
+
+    outage_msg = "Online providers are unreachable; continuing with embedded tags."
+    ctrl.notice.emit(outage_msg)
+    assert not screen.notice_banner.isHidden()
+    assert screen.notice_banner.icon_name == "status_warn"
+    assert screen.notice_banner.text == outage_msg
+    assert screen.notices == (outage_msg,)
+
+    screen.show_error("Planning failed", "ffmpeg failed during probe.")
+    assert not screen.error_frame.isHidden()
+    assert screen.log_feedback_label.isHidden()
+
+    # Missing log directory -> populates log_feedback_label, leaves notice_banner intact!
+    missing_dir = tmp_path / "missing_logs"
+    monkeypatch.setattr(planning_mod, "log_directory", lambda: missing_dir)
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda _url: True))
+
+    screen.open_log_button.click()
+    assert not screen.log_feedback_label.isHidden()
+    assert "does not exist yet" in screen.log_feedback_label.text.casefold()
+    assert str(missing_dir) in screen.log_feedback_label.text
+    assert screen.log_feedback_label.accessibleName() == "Log folder notice"
+    assert screen.log_feedback_label.accessibleDescription() == screen.log_feedback_label.text
+    assert screen.notice_banner.text == outage_msg
+    assert screen.notice_banner.icon_name == "status_warn"
+    assert screen.notices == (outage_msg,)
+
+    # Existing log directory when launcher returns False -> updates dedicated label, keeps notice.
+    existing_dir = tmp_path / "existing_logs"
+    existing_dir.mkdir()
+    monkeypatch.setattr(planning_mod, "log_directory", lambda: existing_dir)
+    monkeypatch.setattr(QDesktopServices, "openUrl", staticmethod(lambda _url: False))
+
+    screen.open_log_button.click()
+    assert not screen.log_feedback_label.isHidden()
+    assert "could not open log folder" in screen.log_feedback_label.text.casefold()
+    assert screen.notice_banner.text == outage_msg
+    assert screen.notices == (outage_msg,)
+
+    # Later successful open clears log_feedback_label while STILL keeping notice_banner intact!
+    opened: list[QUrl] = []
+    monkeypatch.setattr(
+        QDesktopServices,
+        "openUrl",
+        staticmethod(lambda url: opened.append(url) or True),
+    )
+    screen.open_log_button.click()
+    assert len(opened) == 1
+    assert screen.log_feedback_label.isHidden()
+    assert screen.log_feedback_label.text == ""
+    assert screen.notice_banner.text == outage_msg
+    assert screen.notices == (outage_msg,)
+
+    # reset() clears BOTH log_feedback_label and notice_banner cleanly.
+    monkeypatch.setattr(planning_mod, "log_directory", lambda: missing_dir)
+    screen.open_log_button.click()
+    assert not screen.log_feedback_label.isHidden()
+    screen.reset()
+    assert screen.log_feedback_label.isHidden()
+    assert screen.log_feedback_label.text == ""
+    assert screen.notice_banner.isHidden()
+    assert screen.notices == ()
+
+
+def test_svg_icon_engine_clone_subprocess_no_segfault(tmp_path: Path) -> None:
+    """Item 5: detaching copied ``QIcon`` instances must not SIGSEGV under PySide6/shiboken6."""
+    assert not hasattr(SvgIconEngine, "_svg_payload")
+
+    src_root = Path(__file__).resolve().parents[2] / "src"
+    script = """
+import gc
+from PySide6.QtCore import QRect, QSize
+from PySide6.QtGui import QGuiApplication, QIcon, QPainter, QPixmap
+import audio_from_video.gui.resources as res
+from audio_from_video.gui.resources import clear_icon_caches, load_icon
+
+app = QGuiApplication([])
+
+# Direct inline expression copy/detach.
+direct = QIcon(load_icon("settings"))
+direct.addPixmap(QPixmap(4, 4))
+gc.collect()
+assert direct.pixmap(16, 16).width() == 16
+del direct
+
+# Shared-engine copies that force QIcon::detach() -> SvgIconEngine.clone().
+for idx in range(12):
+    name = "settings" if idx % 2 == 0 else "folder"
+    base = load_icon(name)
+    copy = QIcon(base)
+    copy.addPixmap(QPixmap(4, 4))
+    assert len(res._CLONED_ENGINES) == 1, "QIcon::detach() should invoke SvgIconEngine.clone()"
+    gc.collect()
+    pm = copy.pixmap(16, 16)
+    assert not pm.isNull() and pm.width() == 16 and pm.height() == 16
+
+    # Detached icon outlives its source icon.
+    del base
+    gc.collect()
+    canvas = QPixmap(24, 24)
+    painter = QPainter(canvas)
+    copy.paint(painter, QRect(0, 0, 24, 24))
+    painter.end()
+
+    # Chained clone -> clone -> clear_icon_caches() while live must not dangle.
+    copy2 = QIcon(copy)
+    copy2.addPixmap(QPixmap(8, 8))
+    del copy
+    gc.collect()
+    clear_icon_caches()
+    gc.collect()
+    pm2 = copy2.pixmap(QSize(20, 20), 1.5)
+    assert not pm2.isNull() and pm2.width() == 30 and pm2.height() == 30
+    del copy2
+    gc.collect()
+
+clear_icon_caches()
+assert len(res._CLONED_ENGINES) == 0, f"leaked clones: {len(res._CLONED_ENGINES)}"
+
+# Also verify clean interpreter exit while a detached icon stays alive.
+live_base = load_icon("status_ok")
+live_copy = QIcon(live_base)
+live_copy.addPixmap(QPixmap(4, 4))
+gc.collect()
+assert live_copy.pixmap(16, 16).width() == 16
+print("CLONE_OK")
+"""
+    env = dict(os.environ)
+    env["QT_QPA_PLATFORM"] = "offscreen"
+    env["HOME"] = str(tmp_path)
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{src_root}{os.pathsep}{existing_pp}" if existing_pp else str(src_root)
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"SvgIconEngine.clone() subprocess crashed with code {proc.returncode}:\n"
+        f"stdout={proc.stdout}\nstderr={proc.stderr}"
+    )
+    assert "CLONE_OK" in proc.stdout
