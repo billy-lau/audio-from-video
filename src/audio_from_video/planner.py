@@ -9,8 +9,10 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 
+from audio_from_video.cancel import CancelToken
 from audio_from_video.config import AppConfig, parse_quality
 from audio_from_video.discovery import VIDEO_EXTENSIONS
+from audio_from_video.events import EventSink
 from audio_from_video.extractor import plan_extraction
 from audio_from_video.formatting import (
     UNMATCHED_DIR,
@@ -658,8 +660,11 @@ def build_plan(
     on_lookup_progress: Callable[[int, int, str], None] | None = None,
     on_lookup_complete: Callable[[], None] | None = None,
     on_batch_warning: Callable[[str], None] | None = None,
+    cancel: CancelToken | None = None,
+    on_event: EventSink | None = None,
 ) -> list[PlanItem]:
     """Build complete Stage 1 PlanItems (supports both online and offline planning)."""
+    _ = cancel, on_event
     active_overrides = overrides or ManualOverrides()
     validate_manual_overrides(media_inputs, active_overrides)
 

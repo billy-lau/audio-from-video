@@ -72,6 +72,10 @@ class RateLimiter:
         self._lock = threading.Lock()
         self._next_allowed: float | None = None
 
+    def set_sleep(self, fn: Callable[[float], None]) -> None:
+        """Replace the sleep callable used between rate-limited requests."""
+        self._sleep = fn
+
     def acquire(self) -> float:
         """Block until the next request slot; return the seconds slept."""
         with self._lock:
@@ -140,6 +144,11 @@ class HttpFetcher:
         self._jitter = jitter
         self._count_lock = threading.Lock()
         self.request_count = 0
+
+    def set_sleep(self, fn: Callable[[float], None]) -> None:
+        """Replace the retry back-off sleep callable and its rate limiter's sleep."""
+        self._sleep = fn
+        self.limiter.set_sleep(fn)
 
     def close(self) -> None:
         """Close the underlying HTTP client."""

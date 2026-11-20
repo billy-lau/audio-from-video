@@ -14,6 +14,8 @@ from pathlib import Path
 from types import FrameType
 
 from audio_from_video.artwork import ArtworkFetcher
+from audio_from_video.cancel import CancelToken
+from audio_from_video.events import EventSink
 from audio_from_video.extractor import (
     ExtractionError,
     ProcessRegistry,
@@ -346,8 +348,12 @@ def execute_plan(
     artwork_fetcher: ArtworkFetcher | None = None,
     registry: ProcessRegistry | None = None,
     on_result: Callable[[TrackResult, int, int], None] | None = None,
+    install_signal_handlers: bool | None = None,
+    cancel: CancelToken | None = None,
+    on_event: EventSink | None = None,
 ) -> RunSummary:
     """Execute Stage 2 extraction, artwork fetch, and tagging in parallel with SIGINT cleanup."""
+    _ = install_signal_handlers, cancel, on_event
     active_registry = registry if registry is not None else ProcessRegistry()
     summary = RunSummary(output_root=output_root)
     total = len(plan_items)
