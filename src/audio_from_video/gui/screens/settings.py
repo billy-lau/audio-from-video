@@ -6,7 +6,7 @@ import itertools
 import math
 import os
 import tomllib
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -20,13 +20,13 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -48,21 +48,29 @@ from audio_from_video.config import (
     validate_mb_contact,
     validate_mb_user_agent,
 )
-from audio_from_video.gui.resources import load_icon
 from audio_from_video.gui.screens._common import (
     QUALITY_PRESETS,
+    ActionBarFooter,
     IconStatusBanner,
+    SectionCard,
     StatusLine,
+    apply_danger_button_role,
+    apply_primary_button_role,
+    apply_secondary_button_role,
+    configure_table_view,
     format_byte_size,
     format_ttl_duration,
+    join_oxford,
     log_directory,
-    make_bold_font,
     make_heading_label,
+    make_mono_font,
+    make_muted_label,
     open_local_path,
     open_ui_settings,
     read_bool_setting,
     set_accessible,
 )
+from audio_from_video.gui.theme import set_widget_role
 from audio_from_video.models import ConflictPolicy
 
 if TYPE_CHECKING:
@@ -99,15 +107,53 @@ _LOUDNORM_NUMERIC_RANGES: tuple[tuple[str, float, float], ...] = (
 _MATCHING_KEYS: tuple[str, ...] = ("auto_accept_score", "min_margin", "ambiguous_floor")
 
 
-def _join_oxford(items: Sequence[str]) -> str:
-    """Join ``items`` as a human-readable list using the Oxford comma."""
-    if not items:
-        return ""
-    if len(items) == 1:
-        return items[0]
-    if len(items) == 2:
-        return f"{items[0]} and {items[1]}"
-    return f"{', '.join(items[:-1])}, and {items[-1]}"
+_CACHE_HEADER_SPECS: tuple[tuple[str, str, Qt.AlignmentFlag], ...] = (
+    (
+        "Namespace",
+        "Cache table bucket storing metadata, search results, or artwork.",
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+    ),
+    (
+        "Entries",
+        "Total number of cached rows stored in this namespace.",
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+    ),
+    (
+        "Expired",
+        "Number of rows past their expiration window that can be cleared safely.",
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+    ),
+    (
+        "Size",
+        "Approximate payload size stored on disk for this namespace.",
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+    ),
+    (
+        "TTL",
+        "Time to live: how long cached entries stay valid before expiring.",
+        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+    ),
+)
+_CACHE_ROW_HEIGHT = 30
+
+
+def _make_buddied_label(text: str, target: QWidget, parent: QWidget) -> QLabel:
+    """Create a form row ``QLabel`` explicitly bound to ``target`` via ``setBuddy``."""
+    label = QLabel(text, parent)
+    label.setBuddy(target)
+    return label
+
+
+def _make_form_layout() -> QFormLayout:
+    """Return a consistent, cross-platform ``QFormLayout`` for Settings cards."""
+    form = QFormLayout()
+    form.setContentsMargins(0, 0, 0, 0)
+    form.setHorizontalSpacing(14)
+    form.setVerticalSpacing(8)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+    form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+    return form
 
 
 def _is_finite_number(value: object) -> bool:
@@ -212,38 +258,83 @@ class SettingsScreen(QWidget):
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Sticky header bar pinned above the scrollable content so title and status feedback
+        # stay immediately visible when clicking Save or inspecting validation warnings.
+        header_bar = QFrame(self)
+        header_bar.setObjectName("settings_header_bar")
+        header_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        header_bar.setFrameShape(QFrame.Shape.NoFrame)
+        header_bar.setFrameShadow(QFrame.Shadow.Plain)
+        header_bar.setProperty("afvSurface", "header-bar")
+        header_layout = QVBoxLayout(header_bar)
+        header_layout.setContentsMargins(20, 14, 20, 12)
+        header_layout.setSpacing(8)
+
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(2)
+        self.title_label = make_heading_label("Settings", parent=header_bar)
+        self.title_label.setObjectName("settings_title_label")
+        header_subtitle = make_muted_label(
+            "Defaults saved to config.toml; desktop preferences stored locally per user.",
+            parent=header_bar,
+        )
+        header_subtitle.setObjectName("settings_subtitle_label")
+        title_col.addWidget(self.title_label)
+        title_col.addWidget(header_subtitle)
+        header_layout.addLayout(title_col)
+
+        # Inline status/error banner (always pinned above scroll viewport).
+        self.status_banner = IconStatusBanner(header_bar)
+        self.status_banner.setObjectName("settings_status_banner")
+        header_layout.addWidget(self.status_banner)
+        outer_layout.addWidget(header_bar)
 
         scroll = QScrollArea(self)
+        scroll.setObjectName("settings_scroll_area")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         set_accessible(scroll, "Settings content", "Scrollable container for settings controls.")
 
         body = QWidget(scroll)
+        body.setObjectName("settings_scroll_body")
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setContentsMargins(20, 14, 20, 16)
         layout.setSpacing(12)
 
-        self.title_label = make_heading_label("Settings", parent=body)
-        layout.addWidget(self.title_label)
-
-        # Inline status/error banner (for save confirmation and ConfigError text).
-        self.status_banner = IconStatusBanner(body)
-        layout.addWidget(self.status_banner)
-
-        # Config file path row.
-        config_group = QGroupBox("Configuration File", body)
-        config_row = QHBoxLayout(config_group)
+        # -- 1. Configuration File card --
+        config_card = SectionCard(
+            "Configuration File",
+            margins=(16, 12, 16, 12),
+            spacing=8,
+            parent=body,
+        )
+        config_card.setObjectName("settings_config_card")
+        config_row = QHBoxLayout()
+        config_row.setContentsMargins(0, 0, 0, 0)
         config_row.setSpacing(8)
-        self.config_path_edit = QLineEdit(str(self._config_path), config_group)
+        self.config_path_edit = QLineEdit(str(self._config_path), config_card)
+        self.config_path_edit.setObjectName("settings_config_path_edit")
         self.config_path_edit.setReadOnly(True)
+        self.config_path_edit.setFont(make_mono_font(self.config_path_edit))
+        self.config_path_edit.setProperty("afvReadonly", True)
+        self.config_path_edit.setToolTip(str(self._config_path))
+        self.config_path_edit.setCursorPosition(0)
+        self.config_path_edit.setMinimumWidth(140)
         set_accessible(
             self.config_path_edit,
             "Configuration file path",
             "Path to the local config.toml file.",
         )
-        self.open_config_button = QPushButton("&Open config file", config_group)
-        self.open_config_button.setIcon(load_icon("folder"))
+        self.open_config_button = QPushButton("&Open config file", config_card)
+        self.open_config_button.setObjectName("settings_open_config_button")
+        apply_secondary_button_role(self.open_config_button, icon_name="folder")
+        self.open_config_button.setToolTip(
+            "Open config.toml in your default editor, or open its folder if it does not exist yet."
+        )
         set_accessible(
             self.open_config_button,
             "Open config file",
@@ -251,80 +342,120 @@ class SettingsScreen(QWidget):
         )
         config_row.addWidget(self.config_path_edit, stretch=1)
         config_row.addWidget(self.open_config_button)
-        layout.addWidget(config_group)
+        config_card.body_layout.addLayout(config_row)
+        layout.addWidget(config_card)
 
         # Editable configuration keys (all keys in config.EDITABLE_SETTINGS).
         self.env_override_labels: dict[str, StatusLine] = {}
         self.invalid_field_labels: dict[str, StatusLine] = {}
 
-        # -- Binaries --
-        binaries_group = QGroupBox("Binaries", body)
-        binaries_form = QFormLayout(binaries_group)
-        binaries_form.setSpacing(6)
+        # -- 2. Binaries card --
+        binaries_card = SectionCard(
+            "Binaries",
+            subtitle="Leave blank to auto-detect executables from PATH",
+            margins=(16, 12, 16, 12),
+            spacing=8,
+            parent=body,
+        )
+        binaries_card.setObjectName("settings_binaries_card")
+        binaries_form = _make_form_layout()
 
         ffmpeg_wrap, self.ffmpeg_edit, self.browse_ffmpeg_button = self._make_path_row(
-            parent=binaries_group,
+            parent=binaries_card,
             placeholder="Auto-detect from PATH",
             acc_name="FFmpeg binary path",
-            acc_desc="Explicit path to the ffmpeg executable (blank to use PATH).",
+            acc_desc="Explicit path to the FFmpeg executable (blank to use PATH).",
             browse_text="Browse…",
-            browse_name="Browse for ffmpeg binary",
+            browse_name="Browse for FFmpeg binary",
+            tooltip="Optional explicit path to the FFmpeg executable. Leave blank to search PATH.",
+            browse_tooltip="Choose the FFmpeg executable file.",
         )
+        self.ffmpeg_edit.setObjectName("settings_ffmpeg_edit")
+        self.browse_ffmpeg_button.setObjectName("settings_browse_ffmpeg_button")
         self.env_override_labels["binaries.ffmpeg_path"] = StatusLine(
             "status_info",
             "",
-            parent=binaries_group,
+            selectable=True,
+            parent=binaries_card,
         )
         self.env_override_labels["binaries.ffmpeg_path"].setVisible(False)
         self.invalid_field_labels["binaries.ffmpeg_path"] = StatusLine(
             "status_warn",
             "",
-            parent=binaries_group,
+            selectable=True,
+            parent=binaries_card,
         )
         self.invalid_field_labels["binaries.ffmpeg_path"].setVisible(False)
         ffmpeg_col = QVBoxLayout()
-        ffmpeg_col.setSpacing(2)
+        ffmpeg_col.setContentsMargins(0, 0, 0, 0)
+        ffmpeg_col.setSpacing(4)
         ffmpeg_col.addWidget(ffmpeg_wrap)
         ffmpeg_col.addWidget(self.env_override_labels["binaries.ffmpeg_path"])
         ffmpeg_col.addWidget(self.invalid_field_labels["binaries.ffmpeg_path"])
-        binaries_form.addRow("ffmpeg:", ffmpeg_col)
+        binaries_form.addRow(
+            _make_buddied_label("FFmpeg:", self.ffmpeg_edit, binaries_card),
+            ffmpeg_col,
+        )
 
         ffprobe_wrap, self.ffprobe_edit, self.browse_ffprobe_button = self._make_path_row(
-            parent=binaries_group,
+            parent=binaries_card,
             placeholder="Auto-detect from PATH",
             acc_name="FFprobe binary path",
-            acc_desc="Explicit path to the ffprobe executable (blank to use PATH).",
+            acc_desc="Explicit path to the FFprobe executable (blank to use PATH).",
             browse_text="Browse…",
-            browse_name="Browse for ffprobe binary",
+            browse_name="Browse for FFprobe binary",
+            tooltip="Optional explicit path to the FFprobe executable. Leave blank to search PATH.",
+            browse_tooltip="Choose the FFprobe executable file.",
         )
+        self.ffprobe_edit.setObjectName("settings_ffprobe_edit")
+        self.browse_ffprobe_button.setObjectName("settings_browse_ffprobe_button")
         self.env_override_labels["binaries.ffprobe_path"] = StatusLine(
             "status_info",
             "",
-            parent=binaries_group,
+            selectable=True,
+            parent=binaries_card,
         )
         self.env_override_labels["binaries.ffprobe_path"].setVisible(False)
         self.invalid_field_labels["binaries.ffprobe_path"] = StatusLine(
             "status_warn",
             "",
-            parent=binaries_group,
+            selectable=True,
+            parent=binaries_card,
         )
         self.invalid_field_labels["binaries.ffprobe_path"].setVisible(False)
         ffprobe_col = QVBoxLayout()
-        ffprobe_col.setSpacing(2)
+        ffprobe_col.setContentsMargins(0, 0, 0, 0)
+        ffprobe_col.setSpacing(4)
         ffprobe_col.addWidget(ffprobe_wrap)
         ffprobe_col.addWidget(self.env_override_labels["binaries.ffprobe_path"])
         ffprobe_col.addWidget(self.invalid_field_labels["binaries.ffprobe_path"])
-        binaries_form.addRow("ffprobe:", ffprobe_col)
-        layout.addWidget(binaries_group)
+        binaries_form.addRow(
+            _make_buddied_label("FFprobe:", self.ffprobe_edit, binaries_card),
+            ffprobe_col,
+        )
+        binaries_card.body_layout.addLayout(binaries_form)
+        layout.addWidget(binaries_card)
 
-        # -- Audio, Output, and Execution --
-        defaults_group = QGroupBox("Audio, Output, and Execution Defaults", body)
-        defaults_form = QFormLayout(defaults_group)
-        defaults_form.setSpacing(6)
+        # -- 3. Audio, Output, and Execution Defaults card --
+        defaults_card = SectionCard(
+            "Audio, Output, and Execution Defaults",
+            margins=(16, 12, 16, 12),
+            spacing=8,
+            parent=body,
+        )
+        defaults_card.setObjectName("settings_defaults_card")
+        defaults_form = _make_form_layout()
 
-        self.quality_combo = QComboBox(defaults_group)
+        self.quality_combo = QComboBox(defaults_card)
+        self.quality_combo.setObjectName("settings_quality_combo")
         self.quality_combo.setEditable(True)
         self.quality_combo.addItems(QUALITY_PRESETS)
+        self.quality_combo.setMinimumWidth(110)
+        self.quality_combo.setMaximumWidth(170)
+        self.quality_combo.setToolTip(
+            "Default MP3 bitrate (such as 320k or 192k) or LAME variable bitrate preset "
+            "(v0 through v9)."
+        )
         set_accessible(
             self.quality_combo,
             "Default audio quality",
@@ -333,86 +464,132 @@ class SettingsScreen(QWidget):
         self.invalid_field_labels["audio.quality"] = StatusLine(
             "status_warn",
             "",
-            parent=defaults_group,
+            selectable=True,
+            parent=defaults_card,
         )
         self.invalid_field_labels["audio.quality"].setVisible(False)
         quality_col = QVBoxLayout()
-        quality_col.setSpacing(2)
+        quality_col.setContentsMargins(0, 0, 0, 0)
+        quality_col.setSpacing(4)
         quality_col.addWidget(self.quality_combo)
         quality_col.addWidget(self.invalid_field_labels["audio.quality"])
-        defaults_form.addRow("Default &quality:", quality_col)
+        defaults_form.addRow(
+            _make_buddied_label("Default &quality:", self.quality_combo, defaults_card),
+            quality_col,
+        )
 
-        self.copy_mp3_checkbox = QCheckBox(
-            "Copy existing MP3 audio without re-encoding",
-            defaults_group,
+        self.copy_mp3_checkbox = QCheckBox("Copy existing MP3 streams", defaults_card)
+        self.copy_mp3_checkbox.setObjectName("settings_copy_mp3_checkbox")
+        self.copy_mp3_checkbox.setToolTip(
+            "Copy already-encoded MP3 audio streams unchanged instead of re-encoding them."
         )
         set_accessible(
             self.copy_mp3_checkbox,
             "Copy existing MP3 streams",
             "Stream-copy MP3 sources by default instead of re-encoding.",
         )
+        copy_caption = make_muted_label(
+            "Keep original MP3 audio without re-encoding.",
+            scale=0.88,
+            parent=defaults_card,
+        )
+        copy_caption.setContentsMargins(22, 0, 0, 0)
+        copy_caption.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        copy_caption.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.invalid_field_labels["audio.copy_mp3"] = StatusLine(
             "status_warn",
             "",
-            parent=defaults_group,
+            selectable=True,
+            parent=defaults_card,
         )
         self.invalid_field_labels["audio.copy_mp3"].setVisible(False)
         copy_col = QVBoxLayout()
-        copy_col.setSpacing(2)
+        copy_col.setContentsMargins(0, 0, 0, 2)
+        copy_col.setSpacing(1)
         copy_col.addWidget(self.copy_mp3_checkbox)
+        copy_col.addWidget(copy_caption)
         copy_col.addWidget(self.invalid_field_labels["audio.copy_mp3"])
         defaults_form.addRow("", copy_col)
 
         out_wrap, self.output_dir_edit, self.browse_output_button = self._make_path_row(
-            parent=defaults_group,
+            parent=defaults_card,
             placeholder="Default: <input folder>/extracted_audio",
             acc_name="Default output directory",
             acc_desc="Optional default root directory for extracted MP3 files.",
             browse_text="Browse…",
             browse_name="Browse default output folder",
+            tooltip="Optional default destination directory for extracted MP3 files.",
+            browse_tooltip="Choose a default output folder.",
         )
+        self.output_dir_edit.setObjectName("settings_output_dir_edit")
+        self.browse_output_button.setObjectName("settings_browse_output_button")
         self.env_override_labels["output.output_dir"] = StatusLine(
             "status_info",
             "",
-            parent=defaults_group,
+            selectable=True,
+            parent=defaults_card,
         )
         self.env_override_labels["output.output_dir"].setVisible(False)
         self.invalid_field_labels["output.output_dir"] = StatusLine(
             "status_warn",
             "",
-            parent=defaults_group,
+            selectable=True,
+            parent=defaults_card,
         )
         self.invalid_field_labels["output.output_dir"].setVisible(False)
         out_col = QVBoxLayout()
-        out_col.setSpacing(2)
+        out_col.setContentsMargins(0, 0, 0, 0)
+        out_col.setSpacing(4)
         out_col.addWidget(out_wrap)
         out_col.addWidget(self.env_override_labels["output.output_dir"])
         out_col.addWidget(self.invalid_field_labels["output.output_dir"])
-        defaults_form.addRow("Output folder:", out_col)
+        defaults_form.addRow(
+            _make_buddied_label("Output folder:", self.output_dir_edit, defaults_card),
+            out_col,
+        )
 
-        self.flat_checkbox = QCheckBox(
-            "Write files directly into the output folder (flat layout)",
-            defaults_group,
+        self.flat_checkbox = QCheckBox("Flat folder layout", defaults_card)
+        self.flat_checkbox.setObjectName("settings_flat_checkbox")
+        self.flat_checkbox.setToolTip(
+            "Write extracted MP3 files directly into the output folder without Artist/Album "
+            "subfolders."
         )
         set_accessible(
             self.flat_checkbox,
             "Default flat output layout",
             "Write extracted files directly into the output folder without Artist/Album folders.",
         )
+        flat_caption = make_muted_label(
+            "Write files directly into the output folder without Artist/Album subfolders.",
+            scale=0.88,
+            parent=defaults_card,
+        )
+        flat_caption.setContentsMargins(22, 0, 0, 0)
+        flat_caption.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        flat_caption.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
         self.invalid_field_labels["output.flat"] = StatusLine(
             "status_warn",
             "",
-            parent=defaults_group,
+            selectable=True,
+            parent=defaults_card,
         )
         self.invalid_field_labels["output.flat"].setVisible(False)
         flat_col = QVBoxLayout()
-        flat_col.setSpacing(2)
+        flat_col.setContentsMargins(0, 0, 0, 2)
+        flat_col.setSpacing(1)
         flat_col.addWidget(self.flat_checkbox)
+        flat_col.addWidget(flat_caption)
         flat_col.addWidget(self.invalid_field_labels["output.flat"])
         defaults_form.addRow("", flat_col)
 
-        self.conflict_combo = QComboBox(defaults_group)
+        self.conflict_combo = QComboBox(defaults_card)
+        self.conflict_combo.setObjectName("settings_conflict_combo")
         self._populate_conflict_choices()
+        self.conflict_combo.setMinimumWidth(120)
+        self.conflict_combo.setMaximumWidth(190)
+        self.conflict_combo.setToolTip(
+            "Default action when a destination file already exists: skip, overwrite, or rename."
+        )
         set_accessible(
             self.conflict_combo,
             "Default conflict policy",
@@ -421,17 +598,26 @@ class SettingsScreen(QWidget):
         self.invalid_field_labels["output.on_conflict"] = StatusLine(
             "status_warn",
             "",
-            parent=defaults_group,
+            selectable=True,
+            parent=defaults_card,
         )
         self.invalid_field_labels["output.on_conflict"].setVisible(False)
         conflict_col = QVBoxLayout()
-        conflict_col.setSpacing(2)
+        conflict_col.setContentsMargins(0, 0, 0, 0)
+        conflict_col.setSpacing(4)
         conflict_col.addWidget(self.conflict_combo)
         conflict_col.addWidget(self.invalid_field_labels["output.on_conflict"])
-        defaults_form.addRow("On conflict:", conflict_col)
+        defaults_form.addRow(
+            _make_buddied_label("On conflict:", self.conflict_combo, defaults_card),
+            conflict_col,
+        )
 
-        self.jobs_spin = QSpinBox(defaults_group)
+        self.jobs_spin = QSpinBox(defaults_card)
+        self.jobs_spin.setObjectName("settings_jobs_spin")
         self.jobs_spin.setRange(1, _DEFAULT_MAX_JOBS)
+        self.jobs_spin.setMinimumWidth(80)
+        self.jobs_spin.setMaximumWidth(120)
+        self.jobs_spin.setToolTip("Default number of parallel FFmpeg audio extraction workers.")
         set_accessible(
             self.jobs_spin,
             "Default parallel jobs",
@@ -440,26 +626,41 @@ class SettingsScreen(QWidget):
         self.invalid_field_labels["execution.jobs"] = StatusLine(
             "status_warn",
             "",
-            parent=defaults_group,
+            selectable=True,
+            parent=defaults_card,
         )
         self.invalid_field_labels["execution.jobs"].setVisible(False)
         jobs_col = QVBoxLayout()
-        jobs_col.setSpacing(2)
+        jobs_col.setContentsMargins(0, 0, 0, 0)
+        jobs_col.setSpacing(4)
         jobs_col.addWidget(self.jobs_spin)
         jobs_col.addWidget(self.invalid_field_labels["execution.jobs"])
-        defaults_form.addRow("Parallel &jobs:", jobs_col)
-        layout.addWidget(defaults_group)
-
-        # -- MusicBrainz --
-        mb_group = QGroupBox("MusicBrainz", body)
-        mb_form = QFormLayout(mb_group)
-        mb_form.setSpacing(6)
-
-        self.contact_edit = QLineEdit(mb_group)
-        self.contact_edit.setPlaceholderText(
-            "Reachable email relay or public https:// repository URL"
+        defaults_form.addRow(
+            _make_buddied_label("Parallel &jobs:", self.jobs_spin, defaults_card),
+            jobs_col,
         )
+        defaults_card.body_layout.addLayout(defaults_form)
+        layout.addWidget(defaults_card)
+
+        # -- 4. MusicBrainz card --
+        mb_card = SectionCard(
+            "MusicBrainz",
+            subtitle="Contact metadata sent in the request User-Agent header",
+            margins=(16, 12, 16, 12),
+            spacing=8,
+            parent=body,
+        )
+        mb_card.setObjectName("settings_mb_card")
+        mb_form = _make_form_layout()
+
+        self.contact_edit = QLineEdit(mb_card)
+        self.contact_edit.setObjectName("settings_contact_edit")
+        self.contact_edit.setPlaceholderText("alias@relay-provider or https://...")
         self.contact_edit.setClearButtonEnabled(True)
+        self.contact_edit.setMinimumWidth(140)
+        self.contact_edit.setToolTip(
+            "Reachable anonymous email relay or public repository URL stored in config.toml."
+        )
         set_accessible(
             self.contact_edit,
             "MusicBrainz contact",
@@ -468,25 +669,38 @@ class SettingsScreen(QWidget):
         self.env_override_labels["musicbrainz.contact"] = StatusLine(
             "status_info",
             "",
-            parent=mb_group,
+            selectable=True,
+            parent=mb_card,
         )
         self.env_override_labels["musicbrainz.contact"].setVisible(False)
         self.invalid_field_labels["musicbrainz.contact"] = StatusLine(
             "status_warn",
             "",
-            parent=mb_group,
+            selectable=True,
+            parent=mb_card,
         )
         self.invalid_field_labels["musicbrainz.contact"].setVisible(False)
         contact_col = QVBoxLayout()
-        contact_col.setSpacing(2)
+        contact_col.setContentsMargins(0, 0, 0, 0)
+        contact_col.setSpacing(4)
         contact_col.addWidget(self.contact_edit)
         contact_col.addWidget(self.env_override_labels["musicbrainz.contact"])
         contact_col.addWidget(self.invalid_field_labels["musicbrainz.contact"])
-        mb_form.addRow("Contact:", contact_col)
+        mb_form.addRow(
+            _make_buddied_label("Contact:", self.contact_edit, mb_card),
+            contact_col,
+        )
 
-        self.user_agent_edit = QLineEdit(mb_group)
+        self.user_agent_edit = QLineEdit(mb_card)
+        self.user_agent_edit.setObjectName("settings_user_agent_edit")
         self.user_agent_edit.setReadOnly(True)
+        self.user_agent_edit.setFont(make_mono_font(self.user_agent_edit))
+        self.user_agent_edit.setProperty("afvReadonly", True)
         self.user_agent_edit.setPlaceholderText("Derived automatically from contact")
+        self.user_agent_edit.setMinimumWidth(140)
+        self.user_agent_edit.setToolTip(
+            "Read-only User-Agent override configured via config.toml or AFV_MB_USER_AGENT."
+        )
         set_accessible(
             self.user_agent_edit,
             "User-Agent override",
@@ -495,41 +709,64 @@ class SettingsScreen(QWidget):
         self.env_override_labels["musicbrainz.user_agent_override"] = StatusLine(
             "status_info",
             "",
-            parent=mb_group,
+            selectable=True,
+            parent=mb_card,
         )
         self.env_override_labels["musicbrainz.user_agent_override"].setVisible(False)
         self.invalid_field_labels["musicbrainz.user_agent_override"] = StatusLine(
             "status_warn",
             "",
-            parent=mb_group,
+            selectable=True,
+            parent=mb_card,
         )
         self.invalid_field_labels["musicbrainz.user_agent_override"].setVisible(False)
-        self._user_agent_row_widget = QWidget(mb_group)
+        self._user_agent_row_widget = QWidget(mb_card)
         ua_col = QVBoxLayout(self._user_agent_row_widget)
         ua_col.setContentsMargins(0, 0, 0, 0)
-        ua_col.setSpacing(2)
+        ua_col.setSpacing(4)
         ua_col.addWidget(self.user_agent_edit)
         ua_col.addWidget(self.env_override_labels["musicbrainz.user_agent_override"])
         ua_col.addWidget(self.invalid_field_labels["musicbrainz.user_agent_override"])
-        mb_form.addRow("User-Agent:", self._user_agent_row_widget)
-        layout.addWidget(mb_group)
+        mb_form.addRow(
+            _make_buddied_label("User-Agent:", self.user_agent_edit, mb_card),
+            self._user_agent_row_widget,
+        )
+        mb_card.body_layout.addLayout(mb_form)
+        layout.addWidget(mb_card)
 
-        # -- GUI Startup & Logging (QSettings) --
-        gui_group = QGroupBox("Desktop Application (stored locally per user)", body)
-        gui_form = QFormLayout(gui_group)
-        gui_form.setSpacing(6)
+        # -- 5. GUI Startup & Logging (QSettings) card --
+        gui_card = SectionCard(
+            "Desktop Application",
+            subtitle="Stored locally per user",
+            margins=(16, 12, 16, 12),
+            spacing=8,
+            parent=body,
+        )
+        gui_card.setObjectName("settings_gui_card")
+        gui_form = _make_form_layout()
 
         log_row = QHBoxLayout()
+        log_row.setContentsMargins(0, 0, 0, 0)
         log_row.setSpacing(8)
-        self.log_level_combo = QComboBox(gui_group)
+        self.log_level_combo = QComboBox(gui_card)
+        self.log_level_combo.setObjectName("settings_log_level_combo")
         self.log_level_combo.addItems(LOG_LEVEL_CHOICES)
+        self.log_level_combo.setMinimumWidth(100)
+        self.log_level_combo.setMaximumWidth(140)
+        self.log_level_combo.setToolTip(
+            "Application log verbosity saved locally: DEBUG, INFO, WARNING, or ERROR."
+        )
         set_accessible(
             self.log_level_combo,
             "Log level",
             "Logging verbosity saved in application preferences: DEBUG, INFO, WARNING, or ERROR.",
         )
-        self.open_log_folder_button = QPushButton("Open lo&g folder", gui_group)
-        self.open_log_folder_button.setIcon(load_icon("folder"))
+        self.open_log_folder_button = QPushButton("Open lo&g folder", gui_card)
+        self.open_log_folder_button.setObjectName("settings_open_log_folder_button")
+        apply_secondary_button_role(self.open_log_folder_button, icon_name="folder")
+        self.open_log_folder_button.setToolTip(
+            "Open the application log directory in your file manager."
+        )
         set_accessible(
             self.open_log_folder_button,
             "Open log folder",
@@ -538,64 +775,98 @@ class SettingsScreen(QWidget):
         log_row.addWidget(self.log_level_combo)
         log_row.addWidget(self.open_log_folder_button)
         log_row.addStretch(1)
-        gui_form.addRow("Log level:", log_row)
+        gui_form.addRow(
+            _make_buddied_label("Log level:", self.log_level_combo, gui_card),
+            log_row,
+        )
 
-        self.startup_offline_checkbox = QCheckBox("Start in o&ffline mode", gui_group)
+        self.startup_offline_checkbox = QCheckBox("Start in o&ffline mode", gui_card)
+        self.startup_offline_checkbox.setObjectName("settings_startup_offline_checkbox")
+        self.startup_offline_checkbox.setToolTip(
+            "Skip first-run MusicBrainz setup and default new batches to offline mode."
+        )
         set_accessible(
             self.startup_offline_checkbox,
             "Start in offline mode",
             "Skip first-run MusicBrainz setup and default new batches to offline mode.",
         )
         gui_form.addRow("", self.startup_offline_checkbox)
-        layout.addWidget(gui_group)
+        gui_card.body_layout.addLayout(gui_form)
+        layout.addWidget(gui_card)
 
-        # -- Cache Maintenance --
-        cache_group = QGroupBox("Metadata and Artwork Cache", body)
-        cache_layout = QVBoxLayout(cache_group)
-        cache_layout.setSpacing(8)
+        # -- 6. Cache Maintenance card --
+        cache_card = SectionCard(
+            "Metadata and Artwork Cache",
+            margins=(16, 12, 16, 12),
+            spacing=8,
+            parent=body,
+        )
+        cache_card.setObjectName("settings_cache_card")
 
         self.cache_status = StatusLine(
             "status_pending",
             "Loading cache stats…",
-            parent=cache_group,
+            selectable=True,
+            parent=cache_card,
         )
-        cache_layout.addWidget(self.cache_status)
+        self.cache_status.setObjectName("settings_cache_status")
+        cache_card.body_layout.addWidget(self.cache_status)
 
-        self.cache_table = QTableWidget(0, 5, cache_group)
-        self.cache_table.setHorizontalHeaderLabels(
-            ["Namespace", "Entries", "Expired", "Size", "TTL"]
-        )
+        self.cache_table = QTableWidget(0, len(_CACHE_HEADER_SPECS), cache_card)
+        self.cache_table.setObjectName("settings_cache_table")
+        configure_table_view(self.cache_table, row_height=_CACHE_ROW_HEIGHT)
         self.cache_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.cache_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.cache_table.setAlternatingRowColors(True)
-        self.cache_table.verticalHeader().setVisible(False)
-        self.cache_table.setMaximumHeight(180)
+        self.cache_table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for col, (title, tip, align) in enumerate(_CACHE_HEADER_SPECS):
+            header_item = QTableWidgetItem(title)
+            header_item.setToolTip(tip)
+            header_item.setTextAlignment(align)
+            header_item.setData(int(Qt.ItemDataRole.AccessibleTextRole), title)
+            self.cache_table.setHorizontalHeaderItem(col, header_item)
         cache_header = self.cache_table.horizontalHeader()
         cache_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in range(1, 5):
+        for col in range(1, len(_CACHE_HEADER_SPECS)):
             cache_header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        self._update_cache_table_height()
         set_accessible(
             self.cache_table,
             "Cache statistics table",
             "Per-namespace row count, expired row count, byte size, and TTL.",
         )
-        cache_layout.addWidget(self.cache_table)
+        cache_card.body_layout.addWidget(self.cache_table)
 
         cache_buttons = QHBoxLayout()
-        cache_buttons.setSpacing(8)
-        self.refresh_cache_button = QPushButton("&Refresh stats", cache_group)
+        cache_buttons.setContentsMargins(0, 0, 0, 0)
+        cache_buttons.setSpacing(6)
+        self.refresh_cache_button = QPushButton("&Refresh stats", cache_card)
+        self.refresh_cache_button.setObjectName("settings_refresh_cache_button")
+        apply_secondary_button_role(self.refresh_cache_button, icon_name="refresh")
+        self.refresh_cache_button.setToolTip(
+            "Reload cache row counts, expired entry counts, and disk sizes."
+        )
         set_accessible(
             self.refresh_cache_button,
             "Refresh cache statistics",
             "Read updated metadata and artwork cache statistics on a worker thread.",
         )
-        self.clear_expired_button = QPushButton("Clear &expired", cache_group)
+        self.clear_expired_button = QPushButton("Clear &expired", cache_card)
+        self.clear_expired_button.setObjectName("settings_clear_expired_button")
+        apply_secondary_button_role(self.clear_expired_button)
+        self.clear_expired_button.setToolTip(
+            "Delete only expired entries from the local SQLite cache."
+        )
         set_accessible(
             self.clear_expired_button,
             "Clear expired cache entries",
             "Delete only expired entries from the local SQLite cache.",
         )
-        self.clear_cache_button = QPushButton("Clear ca&che", cache_group)
+        self.clear_cache_button = QPushButton("Clear ca&che", cache_card)
+        self.clear_cache_button.setObjectName("settings_clear_cache_button")
+        apply_danger_button_role(self.clear_cache_button, icon_name="trash")
+        self.clear_cache_button.setToolTip(
+            "Delete all cached MusicBrainz, iTunes, and artwork entries."
+        )
         set_accessible(
             self.clear_cache_button,
             "Clear entire cache",
@@ -603,15 +874,16 @@ class SettingsScreen(QWidget):
         )
         cache_buttons.addWidget(self.refresh_cache_button)
         cache_buttons.addWidget(self.clear_expired_button)
-        cache_buttons.addWidget(self.clear_cache_button)
         cache_buttons.addStretch(1)
-        cache_layout.addLayout(cache_buttons)
+        cache_buttons.addWidget(self.clear_cache_button)
+        cache_card.body_layout.addLayout(cache_buttons)
 
-        self.cache_notice_label = QLabel("", cache_group)
-        self.cache_notice_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.cache_notice_label.setWordWrap(True)
-        cache_layout.addWidget(self.cache_notice_label)
-        layout.addWidget(cache_group)
+        self.cache_notice_label = make_muted_label("", scale=0.9, parent=cache_card)
+        self.cache_notice_label.setObjectName("settings_cache_notice_label")
+        self.cache_notice_label.setVisible(False)
+        cache_card.body_layout.addWidget(self.cache_notice_label)
+        layout.addWidget(cache_card)
+        layout.addStretch(1)
 
         # Map attribute path -> primary widget for inspection and parity checks.
         self.setting_widgets: dict[str, QWidget] = {
@@ -626,30 +898,50 @@ class SettingsScreen(QWidget):
             "musicbrainz.contact": self.contact_edit,
         }
 
-        # Footer action bar.
-        footer = QHBoxLayout()
-        footer.setSpacing(10)
-        footer.addStretch(1)
-        self.close_button = QPushButton("C&lose", body)
+        scroll.setWidget(body)
+        outer_layout.addWidget(scroll, stretch=1)
+
+        # Sticky footer action bar pinned outside the scroll area so Close and Save stay reachable.
+        footer = ActionBarFooter(self, margins=(20, 10, 20, 12), spacing=10)
+        footer.setObjectName("settings_footer_bar")
+        footer.content_layout.addStretch(1)
+        self.close_button = QPushButton("C&lose", footer)
+        self.close_button.setObjectName("settings_close_button")
+        apply_secondary_button_role(self.close_button)
+        self.close_button.setToolTip("Close the Settings dialog without saving unapplied changes.")
         set_accessible(
             self.close_button,
             "Close settings",
             "Close the Settings window without saving unapplied changes.",
         )
-        self.save_button = QPushButton("&Save", body)
-        self.save_button.setFont(make_bold_font(self.save_button))
+        self.save_button = QPushButton("&Save", footer)
+        self.save_button.setObjectName("settings_save_button")
+        apply_primary_button_role(self.save_button, icon_name="save")
         self.save_button.setDefault(True)
+        self.save_button.setToolTip(
+            "Validate and save configuration changes and local application preferences."
+        )
         set_accessible(
             self.save_button,
             "Save settings",
             "Validate and save configuration settings and application preferences.",
         )
-        footer.addWidget(self.close_button)
-        footer.addWidget(self.save_button)
-        layout.addLayout(footer)
+        footer.content_layout.addWidget(self.close_button)
+        footer.content_layout.addWidget(self.save_button)
+        outer_layout.addWidget(footer)
 
-        scroll.setWidget(body)
-        outer_layout.addWidget(scroll)
+        self._clear_invalid_field_labels()
+        for key, label in self.env_override_labels.items():
+            set_accessible(
+                label,
+                f"Environment override for {key}",
+                f"Displays active environment variable lock status for {key}.",
+            )
+            set_accessible(
+                label.text_label,
+                f"Environment override for {key}",
+                f"Displays active environment variable lock status for {key}.",
+            )
 
         # Populate widgets from current config, QSettings, and ENV_OVERRIDES.
         self.load_from_config(self._controller.config)
@@ -672,7 +964,7 @@ class SettingsScreen(QWidget):
         self._controller.settings_saved.connect(self._on_settings_saved)
         self._controller.error.connect(self._on_controller_error)
 
-        # Logical tab order.
+        # Logical tab order matching visual left-to-right footer order (Close -> Save).
         tab_chain: tuple[QWidget, ...] = (
             self.config_path_edit,
             self.open_config_button,
@@ -696,8 +988,8 @@ class SettingsScreen(QWidget):
             self.refresh_cache_button,
             self.clear_expired_button,
             self.clear_cache_button,
-            self.save_button,
             self.close_button,
+            self.save_button,
         )
         for prev_widget, next_widget in itertools.pairwise(tab_chain):
             self.setTabOrder(prev_widget, next_widget)
@@ -739,8 +1031,18 @@ class SettingsScreen(QWidget):
         self._env_override_issues.clear()
         self._env_load_error_text = None
         self._raw_load_error_text = None
-        for label in self.invalid_field_labels.values():
+        for key, label in self.invalid_field_labels.items():
             label.set_status("status_warn", "")
+            set_accessible(
+                label,
+                f"Validation status for {key}",
+                f"Inline configuration validation message for {key}.",
+            )
+            set_accessible(
+                label.text_label,
+                f"Validation status for {key}",
+                f"Inline configuration validation message for {key}.",
+            )
             label.setVisible(False)
 
     def _set_invalid_field_label(self, key: str, message: str) -> None:
@@ -785,7 +1087,7 @@ class SettingsScreen(QWidget):
         parts: list[str] = []
         if manual_labels and not editable_labels:
             noun = "setting" if len(manual_labels) == 1 else "settings"
-            joined = _join_oxford(manual_labels)
+            joined = join_oxford(manual_labels)
             parts.append(
                 f"Existing {filename} has an invalid {noun} that cannot be edited in Settings: "
                 f"{joined}."
@@ -796,8 +1098,8 @@ class SettingsScreen(QWidget):
             return " ".join(parts)
 
         if editable_labels and manual_labels:
-            joined_manual = _join_oxford(manual_labels)
-            joined_editable = _join_oxford(editable_labels)
+            joined_manual = join_oxford(manual_labels)
+            joined_editable = join_oxford(editable_labels)
             parts.append(f"Existing {filename} has invalid settings.")
             if detail_text:
                 parts.append(str(detail_text))
@@ -808,7 +1110,7 @@ class SettingsScreen(QWidget):
             )
             return " ".join(parts)
 
-        joined_editable = _join_oxford(editable_labels)
+        joined_editable = join_oxford(editable_labels)
         field_noun = "field" if len(editable_labels) == 1 else "fields"
         header = (
             f"Existing {filename} has an invalid setting: {detail_text}"
@@ -872,7 +1174,7 @@ class SettingsScreen(QWidget):
         """Build a warning describing invalid ``AFV_*`` environment variable overrides."""
         if self._env_override_issues:
             env_vars = [var for var, _detail in self._env_override_issues.values()]
-            joined = _join_oxford(env_vars)
+            joined = join_oxford(env_vars)
             noun = "override" if len(env_vars) == 1 else "overrides"
             details = " ".join(
                 detail.strip() for _var, detail in self._env_override_issues.values() if detail
@@ -964,6 +1266,16 @@ class SettingsScreen(QWidget):
                 label = self.invalid_field_labels.get(attr_path)
                 if label is not None:
                     label.set_status("status_warn", "")
+                    set_accessible(
+                        label,
+                        f"Validation status for {attr_path}",
+                        f"Inline configuration validation message for {attr_path}.",
+                    )
+                    set_accessible(
+                        label.text_label,
+                        f"Validation status for {attr_path}",
+                        f"Inline configuration validation message for {attr_path}.",
+                    )
                     label.setVisible(False)
 
         previous_warning = self._raw_validation_warning
@@ -1003,6 +1315,20 @@ class SettingsScreen(QWidget):
             self.jobs_spin.setMaximum(maximum)
         self.jobs_spin.setValue(max(1, jobs))
 
+    def _update_cache_table_height(self) -> None:
+        """Size ``cache_table`` cleanly to its row count without dead empty space."""
+        header = self.cache_table.horizontalHeader()
+        header_h = max(30, header.sizeHint().height()) if header is not None else 30
+        rows = self.cache_table.rowCount()
+        height = header_h + 28 if rows <= 0 else min(190, header_h + rows * _CACHE_ROW_HEIGHT + 2)
+        self.cache_table.setMinimumHeight(height)
+        self.cache_table.setMaximumHeight(height)
+
+    def _set_cache_notice(self, text: str) -> None:
+        """Update ``cache_notice_label`` text and collapse it cleanly when empty."""
+        self.cache_notice_label.setText(text)
+        self.cache_notice_label.setVisible(bool(text.strip()))
+
     @staticmethod
     def _make_path_row(
         *,
@@ -1012,6 +1338,8 @@ class SettingsScreen(QWidget):
         acc_desc: str,
         browse_text: str,
         browse_name: str,
+        tooltip: str = "",
+        browse_tooltip: str = "",
     ) -> tuple[QWidget, QLineEdit, QPushButton]:
         container = QWidget(parent)
         row = QHBoxLayout(container)
@@ -1020,29 +1348,40 @@ class SettingsScreen(QWidget):
         edit = QLineEdit(container)
         edit.setPlaceholderText(placeholder)
         edit.setClearButtonEnabled(True)
+        edit.setMinimumWidth(110)
+        if tooltip:
+            edit.setToolTip(tooltip)
         set_accessible(edit, acc_name, acc_desc)
         btn = QPushButton(browse_text, container)
-        btn.setIcon(load_icon("folder"))
+        apply_secondary_button_role(btn, icon_name="folder")
+        if browse_tooltip:
+            btn.setToolTip(browse_tooltip)
         set_accessible(btn, browse_name, f"Choose a path for {acc_name}.")
         row.addWidget(edit, stretch=1)
         row.addWidget(btn)
         return container, edit, btn
 
+    @staticmethod
+    def _set_edit_text(edit: QLineEdit, value: str) -> None:
+        """Assign ``value`` and reset cursor to index 0 so narrow views show path prefixes."""
+        edit.setText(value)
+        edit.setCursorPosition(0)
+
     def _apply_defaults_to_widgets(self, cfg: AppConfig) -> None:
         self._populate_conflict_choices()
-        self.ffmpeg_edit.setText(cfg.binaries.ffmpeg_path or "")
-        self.ffprobe_edit.setText(cfg.binaries.ffprobe_path or "")
+        self._set_edit_text(self.ffmpeg_edit, cfg.binaries.ffmpeg_path or "")
+        self._set_edit_text(self.ffprobe_edit, cfg.binaries.ffprobe_path or "")
         self.quality_combo.setCurrentText(cfg.audio.quality)
         self.copy_mp3_checkbox.setChecked(cfg.audio.copy_mp3)
-        self.output_dir_edit.setText(cfg.output.output_dir or "")
+        self._set_edit_text(self.output_dir_edit, cfg.output.output_dir or "")
         self.flat_checkbox.setChecked(cfg.output.flat)
         idx = self.conflict_combo.findData(cfg.output.on_conflict.value)
         if idx >= 0:
             self.conflict_combo.setCurrentIndex(idx)
         jobs = cfg.execution.jobs if cfg.execution.jobs >= 1 else default_jobs()
         self._set_jobs_spin_value(jobs)
-        self.contact_edit.setText(cfg.musicbrainz.contact or "")
-        self.user_agent_edit.setText(cfg.musicbrainz.user_agent_override or "")
+        self._set_edit_text(self.contact_edit, cfg.musicbrainz.contact or "")
+        self._set_edit_text(self.user_agent_edit, cfg.musicbrainz.user_agent_override or "")
         self._baseline_values = {
             "binaries.ffmpeg_path": _normalize_optional_str(cfg.binaries.ffmpeg_path),
             "binaries.ffprobe_path": _normalize_optional_str(cfg.binaries.ffprobe_path),
@@ -1117,7 +1456,7 @@ class SettingsScreen(QWidget):
                 raw_ffmpeg = binaries_tbl.get("ffmpeg_path")
             if isinstance(raw_ffmpeg, str):
                 cleaned_ffmpeg = raw_ffmpeg.strip() or None
-                self.ffmpeg_edit.setText(cleaned_ffmpeg or "")
+                self._set_edit_text(self.ffmpeg_edit, cleaned_ffmpeg or "")
                 baseline["binaries.ffmpeg_path"] = cleaned_ffmpeg
             elif raw_ffmpeg is not None:
                 self.ffmpeg_edit.setText("")
@@ -1132,7 +1471,7 @@ class SettingsScreen(QWidget):
                 raw_ffprobe = binaries_tbl.get("ffprobe_path")
             if isinstance(raw_ffprobe, str):
                 cleaned_ffprobe = raw_ffprobe.strip() or None
-                self.ffprobe_edit.setText(cleaned_ffprobe or "")
+                self._set_edit_text(self.ffprobe_edit, cleaned_ffprobe or "")
                 baseline["binaries.ffprobe_path"] = cleaned_ffprobe
             elif raw_ffprobe is not None:
                 self.ffprobe_edit.setText("")
@@ -1207,7 +1546,7 @@ class SettingsScreen(QWidget):
                 raw_out = output_tbl["output_dir"]
                 if isinstance(raw_out, str):
                     cleaned_out = raw_out.strip() or None
-                    self.output_dir_edit.setText(cleaned_out or "")
+                    self._set_edit_text(self.output_dir_edit, cleaned_out or "")
                     baseline["output.output_dir"] = cleaned_out
                 elif raw_out is not None:
                     self.output_dir_edit.setText("")
@@ -1277,7 +1616,7 @@ class SettingsScreen(QWidget):
                 raw_contact = mb_tbl["contact"]
                 if isinstance(raw_contact, str):
                     cleaned_contact = raw_contact.strip() or None
-                    self.contact_edit.setText(cleaned_contact or "")
+                    self._set_edit_text(self.contact_edit, cleaned_contact or "")
                     baseline["musicbrainz.contact"] = cleaned_contact
                     if cleaned_contact is not None:
                         try:
@@ -1295,7 +1634,7 @@ class SettingsScreen(QWidget):
                 raw_ua = mb_tbl["user_agent"]
                 if isinstance(raw_ua, str):
                     cleaned_ua = raw_ua.strip()
-                    self.user_agent_edit.setText(cleaned_ua)
+                    self._set_edit_text(self.user_agent_edit, cleaned_ua)
                     if cleaned_ua:
                         try:
                             validate_mb_user_agent(cleaned_ua)
@@ -1393,7 +1732,8 @@ class SettingsScreen(QWidget):
             )
             self._clear_invalid_field_labels()
             self._config_path = config.config_path
-            self.config_path_edit.setText(str(config.config_path))
+            self._set_edit_text(self.config_path_edit, str(config.config_path))
+            self.config_path_edit.setToolTip(str(config.config_path))
             self._loaded_from_raw_toml = False
             self._raw_validation_warning = None
             self._config_load_blocked = False
@@ -1411,7 +1751,8 @@ class SettingsScreen(QWidget):
             target_path = self._config_path
 
         self._config_path = target_path
-        self.config_path_edit.setText(str(target_path))
+        self._set_edit_text(self.config_path_edit, str(target_path))
+        self.config_path_edit.setToolTip(str(target_path))
 
         if target_path.is_file():
             self._load_from_raw_toml(target_path)
@@ -1506,11 +1847,12 @@ class SettingsScreen(QWidget):
             edit, button = edit_map[attr_path]
             if attr_path != "musicbrainz.user_agent_override":
                 edit.setReadOnly(False)
+                set_widget_role(edit, "afvReadonly", False)
             if button is not None:
                 button.setEnabled(True)
             if attr_path in previous_overrides and attr_path in self._pre_override_texts:
                 with QSignalBlocker(edit):
-                    edit.setText(self._pre_override_texts.pop(attr_path))
+                    self._set_edit_text(edit, self._pre_override_texts.pop(attr_path))
 
         for env_var, attr_path in ENV_OVERRIDES.items():
             raw = active_env.get(env_var, "").strip()
@@ -1521,13 +1863,15 @@ class SettingsScreen(QWidget):
             if attr_path not in self._pre_override_texts:
                 self._pre_override_texts[attr_path] = edit.text()
             with QSignalBlocker(edit):
-                edit.setText(raw)
+                self._set_edit_text(edit, raw)
             edit.setReadOnly(True)
+            set_widget_role(edit, "afvReadonly", True)
             if button is not None:
                 button.setEnabled(False)
             badge = self.env_override_labels.get(attr_path)
             if badge is not None:
                 badge.set_status("status_info", f"Read-only: set by {env_var}")
+                badge.setToolTip(f"Controlled by the {env_var} environment variable.")
                 badge.setVisible(True)
 
         self._refresh_env_validation_state(
@@ -1642,7 +1986,7 @@ class SettingsScreen(QWidget):
         self._cache_notice_is_busy = False
         self.cache_status.set_status("status_pending", "Loading cache stats…")
         if not self._cache_clear_pending:
-            self.cache_notice_label.setText("")
+            self._set_cache_notice("")
         self._controller.request_cache_stats()
 
     def showEvent(self, event: QShowEvent) -> None:
@@ -1679,23 +2023,23 @@ class SettingsScreen(QWidget):
     def _on_browse_ffmpeg(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
             self,
-            "Select ffmpeg executable",
+            "Select FFmpeg executable",
             self.ffmpeg_edit.text().strip(),
             "All files (*)",
         )
         if selected:
-            self.ffmpeg_edit.setText(selected)
+            self._set_edit_text(self.ffmpeg_edit, selected)
 
     @Slot()
     def _on_browse_ffprobe(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
             self,
-            "Select ffprobe executable",
+            "Select FFprobe executable",
             self.ffprobe_edit.text().strip(),
             "All files (*)",
         )
         if selected:
-            self.ffprobe_edit.setText(selected)
+            self._set_edit_text(self.ffprobe_edit, selected)
 
     @Slot()
     def _on_browse_output(self) -> None:
@@ -1705,7 +2049,7 @@ class SettingsScreen(QWidget):
             self.output_dir_edit.text().strip(),
         )
         if selected:
-            self.output_dir_edit.setText(selected)
+            self._set_edit_text(self.output_dir_edit, selected)
 
     @Slot()
     def _on_open_log_folder(self) -> None:
@@ -1728,7 +2072,7 @@ class SettingsScreen(QWidget):
         self._cache_notice_is_busy = False
         self.clear_expired_button.setEnabled(False)
         self.clear_cache_button.setEnabled(False)
-        self.cache_notice_label.setText("Clearing expired cache entries…")
+        self._set_cache_notice("Clearing expired cache entries…")
         self._controller.clear_cache(expired_only=True)
 
     @Slot()
@@ -1737,7 +2081,7 @@ class SettingsScreen(QWidget):
         self._cache_notice_is_busy = False
         self.clear_expired_button.setEnabled(False)
         self.clear_cache_button.setEnabled(False)
-        self.cache_notice_label.setText("Clearing all cache entries…")
+        self._set_cache_notice("Clearing all cache entries…")
         self._controller.clear_cache(expired_only=False)
 
     @Slot()
@@ -1791,30 +2135,65 @@ class SettingsScreen(QWidget):
             self.clear_cache_button.setEnabled(True)
             if self._cache_notice_is_busy:
                 self._cache_notice_is_busy = False
-                self.cache_notice_label.setText("")
+                self._set_cache_notice("")
         self.cache_table.setRowCount(0)
         if not stats:
+            self._update_cache_table_height()
             self.cache_status.set_status("status_info", "Cache is empty (no cache file found).")
             return
 
         total_rows = 0
         total_expired = 0
         total_bytes = 0
+        right_align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        left_align = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         self.cache_table.setRowCount(len(stats))
         for row_idx, entry in enumerate(stats):
             total_rows += entry.rows
             total_expired += entry.expired
             total_bytes += entry.bytes
-            self.cache_table.setItem(row_idx, 0, QTableWidgetItem(entry.namespace))
-            self.cache_table.setItem(row_idx, 1, QTableWidgetItem(str(entry.rows)))
-            self.cache_table.setItem(row_idx, 2, QTableWidgetItem(str(entry.expired)))
-            self.cache_table.setItem(row_idx, 3, QTableWidgetItem(format_byte_size(entry.bytes)))
-            self.cache_table.setItem(
-                row_idx,
-                4,
-                QTableWidgetItem(format_ttl_duration(entry.ttl_seconds)),
+            size_label = format_byte_size(entry.bytes)
+            ttl_label = format_ttl_duration(entry.ttl_seconds)
+            cells: tuple[tuple[str, str, str, Qt.AlignmentFlag], ...] = (
+                (
+                    entry.namespace,
+                    f"Cache namespace: {entry.namespace}",
+                    f"Namespace {entry.namespace}",
+                    left_align,
+                ),
+                (
+                    str(entry.rows),
+                    f"{entry.rows} cached entries in {entry.namespace}",
+                    f"{entry.rows} entries",
+                    right_align,
+                ),
+                (
+                    str(entry.expired),
+                    f"{entry.expired} expired entries in {entry.namespace}",
+                    f"{entry.expired} expired",
+                    right_align,
+                ),
+                (
+                    size_label,
+                    f"{size_label} ({entry.bytes:,} bytes)",
+                    f"Size {size_label}",
+                    right_align,
+                ),
+                (
+                    ttl_label,
+                    f"Time to live: {ttl_label} ({entry.ttl_seconds:,} seconds)",
+                    f"TTL {ttl_label}",
+                    right_align,
+                ),
             )
+            for col_idx, (text, tooltip, accessible, alignment) in enumerate(cells):
+                item = QTableWidgetItem(text)
+                item.setTextAlignment(alignment)
+                item.setToolTip(tooltip)
+                item.setData(int(Qt.ItemDataRole.AccessibleTextRole), accessible)
+                self.cache_table.setItem(row_idx, col_idx, item)
 
+        self._update_cache_table_height()
         self.cache_status.set_status(
             "status_ok",
             f"Total: {total_rows} entries ({total_expired} expired), "
@@ -1829,7 +2208,7 @@ class SettingsScreen(QWidget):
         self.clear_cache_button.setEnabled(True)
         count = max(0, int(removed))
         noun = "entry" if count == 1 else "entries"
-        self.cache_notice_label.setText(f"Cleared {count} cache {noun}.")
+        self._set_cache_notice(f"Cleared {count} cache {noun}.")
         self.cache_status.set_status("status_info", f"Cleared {count} cache {noun}.")
 
     @Slot(object)
@@ -1886,13 +2265,13 @@ class SettingsScreen(QWidget):
             # instead of showing a red Settings error banner or clearing any
             # config.toml validation warning above.
             self._cache_notice_is_busy = True
-            self.cache_notice_label.setText(text)
+            self._set_cache_notice(text)
             self.cache_status.set_status("status_info", text)
             return
 
         self._cache_notice_is_busy = False
         if was_cache_pending:
-            self.cache_notice_label.setText(text)
+            self._set_cache_notice(text)
         if was_cache_pending or (was_stats_pending and _is_cache_related_error(heading, body)):
             self.cache_status.set_status("status_warn", text)
 

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import itertools
 import os
+import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import QEvent, QSize, Qt, Slot
 from PySide6.QtGui import (
     QDragEnterEvent,
+    QDragLeaveEvent,
     QDragMoveEvent,
     QDropEvent,
     QIcon,
@@ -26,7 +28,6 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QFrame,
     QGridLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -54,16 +55,25 @@ from audio_from_video.config import (
 )
 from audio_from_video.discovery import DEFAULT_OUTPUT_FOLDER_NAME, VIDEO_EXTENSIONS
 from audio_from_video.gui.controller import ControllerState
-from audio_from_video.gui.resources import load_icon, render_svg_pixmap
+from audio_from_video.gui.resources import load_icon
 from audio_from_video.gui.screens._common import (
     QUALITY_PRESETS,
+    ActionBarFooter,
     IconStatusBanner,
+    MiddleElideLabel,
+    SectionCard,
     StatusLine,
-    make_bold_font,
+    ThemedSvgLabel,
+    apply_primary_button_role,
+    apply_secondary_button_role,
+    join_oxford,
+    make_divider,
     make_heading_label,
+    make_muted_label,
     open_ui_settings,
     set_accessible,
 )
+from audio_from_video.gui.theme import refresh_themed_widgets, set_widget_role
 from audio_from_video.models import ConflictPolicy, ManualOverrides
 from audio_from_video.session import RunOptions
 
@@ -85,15 +95,9 @@ _UNSET = object()
 _DefaultsKey = tuple[str, bool, str | None, bool, ConflictPolicy, int]
 
 
-def _join_oxford(items: Sequence[str]) -> str:
-    """Join ``items`` into a prose list using the Oxford comma."""
-    if not items:
-        return ""
-    if len(items) == 1:
-        return items[0]
-    if len(items) == 2:
-        return f"{items[0]} and {items[1]}"
-    return f"{', '.join(items[:-1])}, and {items[-1]}"
+def _open_shortcut_text() -> str:
+    """Return a crisp, cross-platform label for the Open shortcut."""
+    return "Cmd+O" if sys.platform == "darwin" else "Ctrl+O"
 
 
 def _find_invalid_env_overrides(active_env: Mapping[str, str]) -> list[tuple[str, str]]:
@@ -149,12 +153,12 @@ def _invalid_config_banner_text(
 
     if file_error is not None:
         if env_issues:
-            sources = _join_oxford(["config.toml", *(var for var, _detail in env_issues)])
+            sources = join_oxford(["config.toml", *(var for var, _detail in env_issues)])
             return f"Configuration is invalid ({sources}); using built-in defaults."
         return INVALID_CONFIG_BANNER_TEXT
 
     if env_issues:
-        names = _join_oxford([var for var, _detail in env_issues])
+        names = join_oxford([var for var, _detail in env_issues])
         detail = env_issues[0][1].strip()
         if detail and "config.toml" not in detail.casefold():
             return f"{INVALID_ENV_CONFIG_BANNER_TEXT} Check {names}: {detail}"
@@ -255,7 +259,7 @@ def _compute_default_output_preview(
 
 
 class _DropTargetFrame(QFrame):
-    """Frame accepting file and folder drag-and-drop without adding custom Qt signals."""
+    """Frame accepting file and folder drag-and-drop with hover highlight feedback."""
 
     def __init__(
         self,
@@ -264,10 +268,18 @@ class _DropTargetFrame(QFrame):
     ) -> None:
         super().__init__(parent)
         self._on_paths_dropped = on_paths_dropped
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAcceptDrops(True)
+        self.setProperty("afvSurface", "drop-zone")
+        self.setProperty("afvDragActive", False)
+
+    def set_drag_active(self, active: bool) -> None:
+        """Toggle the dashed drop-zone hover ring via centralized dynamic properties."""
+        set_widget_role(self, "afvDragActive", bool(active))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if _has_local_urls(event):
+            self.set_drag_active(True)
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -278,7 +290,12 @@ class _DropTargetFrame(QFrame):
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self.set_drag_active(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:
+        self.set_drag_active(False)
         paths = _extract_dropped_paths(event)
         if paths:
             self._on_paths_dropped(paths)
@@ -293,14 +310,25 @@ class _DropListWidget(QListWidget):
     def __init__(
         self,
         on_paths_dropped: Callable[[list[Path]], None],
+        on_drag_active: Callable[[bool], None] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self._on_paths_dropped = on_paths_dropped
+        self._on_drag_active = on_drag_active
         self.setAcceptDrops(True)
+
+    def sizeHint(self) -> QSize:
+        """Keep a compact default list height inside scroll areas instead of Qt's 192 px box."""
+        base = super().sizeHint()
+        visible_rows = max(2, min(4, self.count()))
+        target_height = 20 + visible_rows * 27 if self.count() > 0 else 76
+        return QSize(base.width(), max(76, min(140, target_height)))
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if _has_local_urls(event):
+            if self._on_drag_active is not None:
+                self._on_drag_active(True)
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -311,7 +339,14 @@ class _DropListWidget(QListWidget):
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        if self._on_drag_active is not None:
+            self._on_drag_active(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:
+        if self._on_drag_active is not None:
+            self._on_drag_active(False)
         paths = _extract_dropped_paths(event)
         if paths:
             self._on_paths_dropped(paths)
@@ -356,35 +391,55 @@ class InputsScreen(QWidget):
 
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
         scroll = QScrollArea(self)
+        scroll.setObjectName("inputs_scroll_area")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         set_accessible(scroll, "Inputs content", "Scrollable container for input controls.")
 
         body = QWidget(scroll)
-        layout = QVBoxLayout(body)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(12)
+        body.setObjectName("inputs_scroll_body")
+        body_row = QHBoxLayout(body)
+        body_row.setContentsMargins(24, 10, 24, 12)
+        body_row.setSpacing(0)
+
+        column = QWidget(body)
+        column.setObjectName("inputs_content_column")
+        column.setMaximumWidth(960)
+        column.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        body_row.addStretch(0)
+        body_row.addWidget(column, stretch=1)
+        body_row.addStretch(0)
+
+        layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        shortcut_label = _open_shortcut_text()
 
         # Header row with Settings button.
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
         title_box = QVBoxLayout()
+        title_box.setContentsMargins(0, 0, 0, 0)
         title_box.setSpacing(2)
-        self.title_label = make_heading_label("Select Videos to Extract", parent=body)
-        subtitle = QLabel(
+        self.title_label = make_heading_label("Select Videos to Extract", parent=column)
+        self.title_label.setObjectName("inputs_title_label")
+        subtitle = make_muted_label(
             "Options changed here apply only to this run. Edit saved defaults in Settings.",
-            body,
+            parent=column,
         )
-        subtitle.setWordWrap(True)
+        subtitle.setObjectName("inputs_subtitle_label")
         title_box.addWidget(self.title_label)
         title_box.addWidget(subtitle)
         header_row.addLayout(title_box, stretch=1)
 
-        self.settings_button = QPushButton("Se&ttings…", body)
-        self.settings_button.setIcon(load_icon("settings"))
+        self.settings_button = QPushButton("Se&ttings…", column)
+        self.settings_button.setObjectName("inputs_settings_button")
+        apply_secondary_button_role(self.settings_button, icon_name="settings")
         self.settings_button.setToolTip(
             "Open Settings to edit saved defaults, inspect cache statistics, or view logs."
         )
@@ -397,128 +452,178 @@ class InputsScreen(QWidget):
         layout.addLayout(header_row)
 
         # Persistent warning banner shown when configuration failed to load.
-        self.config_warning_banner = IconStatusBanner(body)
+        self.config_warning_banner = IconStatusBanner(column)
+        self.config_warning_banner.setObjectName("inputs_config_warning_banner")
         layout.addWidget(self.config_warning_banner)
 
         # Inline error banner (hidden until input_error or local validation failure).
-        self.error_banner = IconStatusBanner(body)
+        self.error_banner = IconStatusBanner(column)
+        self.error_banner.setObjectName("inputs_error_banner")
         layout.addWidget(self.error_banner)
 
         # Brief neutral notice shown when a Setup detour switches Online to Offline.
-        self.mode_notice_banner = IconStatusBanner(body)
+        self.mode_notice_banner = IconStatusBanner(column)
+        self.mode_notice_banner.setObjectName("inputs_mode_notice_banner")
         layout.addWidget(self.mode_notice_banner)
 
-        # Input files and drop zone section.
-        inputs_group = QGroupBox("Input Files and Folders", body)
-        inputs_layout = QVBoxLayout(inputs_group)
-        inputs_layout.setSpacing(8)
+        # Input files and drop zone section (elevated SectionCard, single dashed drop zone).
+        inputs_card = SectionCard(
+            "Input Files and Folders",
+            margins=(16, 9, 16, 9),
+            spacing=6,
+            parent=column,
+        )
+        inputs_card.setObjectName("inputs_files_card")
 
-        self.drop_zone = _DropTargetFrame(self.add_paths, inputs_group)
-        self.drop_zone.setFrameShape(QFrame.Shape.StyledPanel)
-        self.drop_zone.setFrameShadow(QFrame.Shadow.Sunken)
+        self.recursive_checkbox = QCheckBox("Include su&bfolders", inputs_card)
+        self.recursive_checkbox.setObjectName("inputs_recursive_checkbox")
+        self.recursive_checkbox.setChecked(False)
+        self.recursive_checkbox.setToolTip(
+            "Scan inside nested subfolders when adding directories to the batch."
+        )
+        set_accessible(
+            self.recursive_checkbox,
+            "Include subfolders",
+            "Scan added folders recursively for supported video files.",
+        )
+        inputs_card.add_header_accessory(self.recursive_checkbox)
+
+        self.drop_zone = _DropTargetFrame(self.add_paths, inputs_card)
+        self.drop_zone.setObjectName("inputs_drop_zone")
+        self.drop_zone.setFrameShape(QFrame.Shape.NoFrame)
         set_accessible(
             self.drop_zone,
             "Input drop zone",
             "Drop video files or folders here to add them to the extraction queue.",
         )
         drop_layout = QVBoxLayout(self.drop_zone)
-        drop_layout.setContentsMargins(10, 8, 10, 8)
-        drop_layout.setSpacing(6)
+        drop_layout.setContentsMargins(12, 10, 12, 10)
+        drop_layout.setSpacing(8)
 
         hint_row = QHBoxLayout()
+        hint_row.setContentsMargins(0, 0, 0, 0)
         hint_row.setSpacing(8)
-        drop_icon = QLabel(self.drop_zone)
-        drop_icon.setPixmap(render_svg_pixmap("drop_zone", size=20))
-        drop_icon.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.drop_hint_label = QLabel(
-            "Drop video files or folders here, or use Add files (Ctrl/Cmd+O) or Add folder.",
-            self.drop_zone,
+        self._drop_icon = ThemedSvgLabel("drop_zone", size=20, parent=self.drop_zone)
+        self._drop_icon.setObjectName("inputs_drop_icon")
+        self.drop_hint_label = make_muted_label(
+            f"Drop video files or folders here, or use Add files ({shortcut_label}) or Add folder.",
+            scale=0.95,
+            parent=self.drop_zone,
         )
-        self.drop_hint_label.setWordWrap(True)
-        hint_row.addWidget(drop_icon)
+        self.drop_hint_label.setObjectName("inputs_drop_hint_label")
+        hint_row.addWidget(self._drop_icon, alignment=Qt.AlignmentFlag.AlignVCenter)
         hint_row.addWidget(self.drop_hint_label, stretch=1)
         drop_layout.addLayout(hint_row)
 
-        self.inputs_list = _DropListWidget(self.add_paths, self.drop_zone)
+        self.inputs_list = _DropListWidget(
+            self.add_paths,
+            on_drag_active=self.drop_zone.set_drag_active,
+            parent=self.drop_zone,
+        )
+        self.inputs_list.setObjectName("inputs_list")
         self.inputs_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self.inputs_list.setMinimumHeight(110)
+        self.inputs_list.setMinimumHeight(76)
+        self.inputs_list.setMaximumHeight(140)
+        self.inputs_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.inputs_list.setAlternatingRowColors(True)
         self.inputs_list.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.inputs_list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.inputs_list.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.inputs_list.setToolTip(
+            "Queued video files and folders. Press Delete or Backspace to remove selected items."
+        )
         set_accessible(
             self.inputs_list,
             "Queued input files and folders",
             "List of selected video files and folders to scan and plan.",
         )
         drop_layout.addWidget(self.inputs_list)
-        inputs_layout.addWidget(self.drop_zone)
+        inputs_card.body_layout.addWidget(self.drop_zone)
 
         toolbar_row = QHBoxLayout()
+        toolbar_row.setContentsMargins(0, 0, 0, 0)
         toolbar_row.setSpacing(8)
-        self.add_files_button = QPushButton("Add &files…", inputs_group)
+        self.add_files_button = QPushButton("Add &files…", inputs_card)
+        self.add_files_button.setObjectName("inputs_add_files_button")
         self.add_files_button.setIcon(self._file_icon)
-        self.add_files_button.setToolTip("Add one or more video files (Ctrl/Cmd+O).")
+        apply_secondary_button_role(self.add_files_button)
+        self.add_files_button.setToolTip(f"Add one or more video files ({shortcut_label}).")
         set_accessible(
             self.add_files_button,
             "Add files",
-            "Choose video files to add to the batch queue (shortcut Ctrl/Cmd+O).",
+            f"Choose video files to add to the batch queue (shortcut {shortcut_label}).",
         )
 
-        self.add_folder_button = QPushButton("Add f&older…", inputs_group)
+        self.add_folder_button = QPushButton("Add f&older…", inputs_card)
+        self.add_folder_button.setObjectName("inputs_add_folder_button")
         self.add_folder_button.setIcon(self._folder_icon)
+        apply_secondary_button_role(self.add_folder_button)
+        self.add_folder_button.setToolTip("Add a folder of video files to scan.")
         set_accessible(
             self.add_folder_button,
             "Add folder",
             "Choose a folder of video files to scan.",
         )
 
-        self.remove_button = QPushButton("&Remove", inputs_group)
+        self.remove_button = QPushButton("&Remove", inputs_card)
+        self.remove_button.setObjectName("inputs_remove_button")
+        apply_secondary_button_role(self.remove_button, icon_name="trash")
         self.remove_button.setEnabled(False)
+        self.remove_button.setToolTip(
+            "Remove the selected files or folders from the queue (Delete or Backspace)."
+        )
         set_accessible(
             self.remove_button,
             "Remove selected inputs",
             "Remove the highlighted files or folders from the input queue.",
         )
 
-        self.clear_button = QPushButton("C&lear", inputs_group)
+        self.clear_button = QPushButton("C&lear", inputs_card)
+        self.clear_button.setObjectName("inputs_clear_button")
+        apply_secondary_button_role(self.clear_button)
         self.clear_button.setEnabled(False)
+        self.clear_button.setToolTip("Remove every file and folder from the input queue.")
         set_accessible(
             self.clear_button,
             "Clear all inputs",
             "Remove every file and folder from the input queue.",
         )
 
-        self.recursive_checkbox = QCheckBox("Include su&bfolders", inputs_group)
-        self.recursive_checkbox.setChecked(False)
-        set_accessible(
-            self.recursive_checkbox,
-            "Include subfolders",
-            "Scan added folders recursively for supported video files.",
-        )
-
         toolbar_row.addWidget(self.add_files_button)
         toolbar_row.addWidget(self.add_folder_button)
+        toolbar_row.addStretch(1)
         toolbar_row.addWidget(self.remove_button)
         toolbar_row.addWidget(self.clear_button)
-        toolbar_row.addStretch(1)
-        toolbar_row.addWidget(self.recursive_checkbox)
-        inputs_layout.addLayout(toolbar_row)
-        layout.addWidget(inputs_group)
+        inputs_card.body_layout.addLayout(toolbar_row)
+        layout.addWidget(inputs_card)
 
-        # Output folder picker.
-        output_group = QGroupBox("Output Folder", body)
-        output_layout = QVBoxLayout(output_group)
-        output_layout.setSpacing(6)
+        # Output folder picker card.
+        output_card = SectionCard(
+            "Output Folder",
+            margins=(16, 10, 16, 10),
+            spacing=5,
+            parent=column,
+        )
+        output_card.setObjectName("inputs_output_card")
 
-        self.output_frame = QFrame(output_group)
+        self.output_frame = QFrame(output_card)
+        self.output_frame.setObjectName("inputs_output_frame")
+        self.output_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.output_frame.setFrameShape(QFrame.Shape.NoFrame)
-        self.output_frame.setLineWidth(1)
+        self.output_frame.setProperty("afvHighlight", "none")
         frame_layout = QHBoxLayout(self.output_frame)
-        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.setContentsMargins(6, 5, 6, 5)
         frame_layout.setSpacing(8)
 
         output_label = QLabel("Out&put folder:", self.output_frame)
         self.output_dir_edit = QLineEdit(self.output_frame)
+        self.output_dir_edit.setObjectName("inputs_output_dir_edit")
+        self.output_dir_edit.setPlaceholderText("Leave blank to use default folder")
         self.output_dir_edit.setClearButtonEnabled(True)
+        self.output_dir_edit.setToolTip(
+            "Optional destination directory for extracted MP3 files. "
+            "Leave blank to use the computed default shown below."
+        )
         output_label.setBuddy(self.output_dir_edit)
         set_accessible(
             self.output_dir_edit,
@@ -527,7 +632,10 @@ class InputsScreen(QWidget):
         )
 
         self.output_browse_button = QPushButton("Bro&wse…", self.output_frame)
+        self.output_browse_button.setObjectName("inputs_output_browse_button")
         self.output_browse_button.setIcon(self._folder_icon)
+        apply_secondary_button_role(self.output_browse_button)
+        self.output_browse_button.setToolTip("Choose a destination folder for extracted MP3 files.")
         set_accessible(
             self.output_browse_button,
             "Browse output folder",
@@ -535,7 +643,12 @@ class InputsScreen(QWidget):
         )
 
         self.output_reset_button = QPushButton("Use &default", self.output_frame)
+        self.output_reset_button.setObjectName("inputs_output_reset_button")
+        apply_secondary_button_role(self.output_reset_button)
         self.output_reset_button.setEnabled(False)
+        self.output_reset_button.setToolTip(
+            "Clear the custom folder and return to the computed default destination."
+        )
         set_accessible(
             self.output_reset_button,
             "Use default output folder",
@@ -546,29 +659,44 @@ class InputsScreen(QWidget):
         frame_layout.addWidget(self.output_dir_edit, stretch=1)
         frame_layout.addWidget(self.output_browse_button)
         frame_layout.addWidget(self.output_reset_button)
-        output_layout.addWidget(self.output_frame)
+        output_card.body_layout.addWidget(self.output_frame)
 
         self.output_default_status = StatusLine(
             "status_info",
             f"Default: <input folder>/{DEFAULT_OUTPUT_FOLDER_NAME}",
-            parent=output_group,
+            selectable=True,
+            parent=output_card,
         )
-        output_layout.addWidget(self.output_default_status)
-        layout.addWidget(output_group)
+        self.output_default_status.setObjectName("inputs_output_default_status")
+        output_card.body_layout.addWidget(self.output_default_status)
+        layout.addWidget(output_card)
 
-        # Run options panel (per-run only, never written back to QSettings or config.toml).
-        options_group = QGroupBox("Run Options (this run only)", body)
-        options_grid = QGridLayout(options_group)
-        options_grid.setHorizontalSpacing(16)
-        options_grid.setVerticalSpacing(8)
+        # Run options card (per-run only, never written back to QSettings or config.toml).
+        options_card = SectionCard(
+            "Run Options",
+            subtitle="Applies only to this run; saved defaults live in Settings",
+            margins=(16, 11, 16, 11),
+            spacing=8,
+            parent=column,
+        )
+        options_card.setObjectName("inputs_options_card")
 
-        # Mode toggle (Online vs Offline).
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(12)
-        mode_label = QLabel("Lookup mode:", options_group)
+        # Subsection 1: Metadata lookup and matching behavior.
+        lookup_row = QHBoxLayout()
+        lookup_row.setContentsMargins(0, 0, 0, 0)
+        lookup_row.setSpacing(14)
+        mode_label = QLabel("Lookup mode:", options_card)
         self.mode_group = QButtonGroup(self)
-        self.online_radio = QRadioButton("O&nline", options_group)
-        self.offline_radio = QRadioButton("Offl&ine", options_group)
+        self.online_radio = QRadioButton("O&nline", options_card)
+        self.online_radio.setObjectName("inputs_online_radio")
+        self.online_radio.setToolTip(
+            "Query MusicBrainz and iTunes for track metadata and embed cover artwork."
+        )
+        self.offline_radio = QRadioButton("Offl&ine", options_card)
+        self.offline_radio.setObjectName("inputs_offline_radio")
+        self.offline_radio.setToolTip(
+            "Skip all online requests and rely only on container tags and filenames."
+        )
         self.mode_group.addButton(self.online_radio)
         self.mode_group.addButton(self.offline_radio)
         set_accessible(
@@ -581,16 +709,22 @@ class InputsScreen(QWidget):
             "Offline lookup mode",
             "Skip all online lookups and use embedded container tags and filenames only.",
         )
-        mode_row.addWidget(self.online_radio)
-        mode_row.addWidget(self.offline_radio)
-        mode_row.addStretch(1)
-        options_grid.addWidget(mode_label, 0, 0)
-        options_grid.addLayout(mode_row, 0, 1, 1, 3)
+        lookup_row.addWidget(mode_label)
+        lookup_row.addWidget(self.online_radio)
+        lookup_row.addWidget(self.offline_radio)
+        lookup_row.addStretch(1)
+        options_card.body_layout.addLayout(lookup_row)
 
-        self.always_prompt_checkbox = QCheckBox("Confirm every &match", options_group)
+        matching_checks = QGridLayout()
+        matching_checks.setContentsMargins(0, 0, 0, 0)
+        matching_checks.setHorizontalSpacing(18)
+        matching_checks.setVerticalSpacing(6)
+        self.always_prompt_checkbox = QCheckBox("Confirm every &match", options_card)
+        self.always_prompt_checkbox.setObjectName("inputs_always_prompt_checkbox")
         self.always_prompt_checkbox.setChecked(False)
         self.always_prompt_checkbox.setToolTip(
-            "Prompt before accepting every online match instead of only uncertain matches."
+            "Ask for confirmation before accepting each online match instead of only "
+            "uncertain matches."
         )
         set_accessible(
             self.always_prompt_checkbox,
@@ -598,250 +732,434 @@ class InputsScreen(QWidget):
             "Always show the match dialog even for high-confidence online matches.",
         )
 
-        self.keep_native_checkbox = QCheckBox("Keep nati&ve names", options_group)
+        self.keep_native_checkbox = QCheckBox("Keep nati&ve names", options_card)
+        self.keep_native_checkbox.setObjectName("inputs_keep_native_checkbox")
         self.keep_native_checkbox.setChecked(False)
         self.keep_native_checkbox.setToolTip(
-            "Keep non-Latin artist or album names when no English alias is available."
+            "Skip the English alias prompt and retain native non-Latin artist and album names."
         )
         set_accessible(
             self.keep_native_checkbox,
             "Keep native names",
             "Keep native non-Latin artist and album names without prompting for an English alias.",
         )
-        options_grid.addWidget(self.always_prompt_checkbox, 1, 0, 1, 2)
-        options_grid.addWidget(self.keep_native_checkbox, 1, 2, 1, 2)
+        matching_checks.addWidget(self.always_prompt_checkbox, 0, 0)
+        matching_checks.addWidget(self.keep_native_checkbox, 0, 1)
+        matching_checks.setColumnStretch(0, 1)
+        matching_checks.setColumnStretch(1, 1)
+        options_card.body_layout.addLayout(matching_checks)
 
-        quality_label = QLabel("&Quality:", options_group)
-        self.quality_combo = QComboBox(options_group)
+        options_card.body_layout.addWidget(make_divider(options_card))
+
+        # Subsection 2: Compact top-labeled audio, output, and stream fields (fits <= 540 px).
+        params_row1 = QGridLayout()
+        params_row1.setContentsMargins(0, 0, 0, 0)
+        params_row1.setHorizontalSpacing(14)
+        params_row1.setVerticalSpacing(4)
+
+        quality_label = make_muted_label(
+            "&Quality",
+            scale=0.9,
+            word_wrap=False,
+            parent=options_card,
+        )
+        self.quality_combo = QComboBox(options_card)
+        self.quality_combo.setObjectName("inputs_quality_combo")
         self.quality_combo.setEditable(True)
         self.quality_combo.addItems(QUALITY_PRESETS)
+        self.quality_combo.setToolTip(
+            "MP3 bitrate such as 320k or 192k, or LAME variable bitrate preset (v0 through v9)."
+        )
         quality_label.setBuddy(self.quality_combo)
         set_accessible(
             self.quality_combo,
             "Audio quality",
             "MP3 bitrate such as 320k, 192k, or LAME VBR preset v0 through v9.",
         )
-        options_grid.addWidget(quality_label, 2, 0)
-        options_grid.addWidget(self.quality_combo, 2, 1)
 
-        conflict_label = QLabel("On &conflict:", options_group)
-        self.conflict_combo = QComboBox(options_group)
+        conflict_label = make_muted_label(
+            "On &conflict",
+            scale=0.9,
+            word_wrap=False,
+            parent=options_card,
+        )
+        self.conflict_combo = QComboBox(options_card)
+        self.conflict_combo.setObjectName("inputs_conflict_combo")
         self.conflict_combo.addItem("Skip existing", ConflictPolicy.SKIP.value)
         self.conflict_combo.addItem("Overwrite", ConflictPolicy.OVERWRITE.value)
         self.conflict_combo.addItem("Rename", ConflictPolicy.RENAME.value)
+        self.conflict_combo.setToolTip(
+            "Choose how to handle destination MP3 files that already exist: skip, overwrite, "
+            "or rename."
+        )
         conflict_label.setBuddy(self.conflict_combo)
         set_accessible(
             self.conflict_combo,
             "On conflict policy",
             "Action when a destination file already exists: skip, overwrite, or rename.",
         )
-        options_grid.addWidget(conflict_label, 2, 2)
-        options_grid.addWidget(self.conflict_combo, 2, 3)
 
-        jobs_label = QLabel("&Jobs:", options_group)
-        self.jobs_spin = QSpinBox(options_group)
+        jobs_label = make_muted_label(
+            "&Jobs",
+            scale=0.9,
+            word_wrap=False,
+            parent=options_card,
+        )
+        self.jobs_spin = QSpinBox(options_card)
+        self.jobs_spin.setObjectName("inputs_jobs_spin")
         self.jobs_spin.setRange(1, 256)
+        self.jobs_spin.setToolTip("Maximum number of FFmpeg audio extractions to run in parallel.")
         jobs_label.setBuddy(self.jobs_spin)
         set_accessible(
             self.jobs_spin,
             "Parallel jobs",
             "Number of parallel FFmpeg extraction workers.",
         )
-        options_grid.addWidget(jobs_label, 3, 0)
-        options_grid.addWidget(self.jobs_spin, 3, 1)
 
-        lang_label = QLabel("Preferred audio language:", options_group)
-        self.lang_edit = QLineEdit(options_group)
+        params_row1.addWidget(quality_label, 0, 0)
+        params_row1.addWidget(self.quality_combo, 1, 0)
+        params_row1.addWidget(conflict_label, 0, 1)
+        params_row1.addWidget(self.conflict_combo, 1, 1)
+        params_row1.addWidget(jobs_label, 0, 2)
+        params_row1.addWidget(self.jobs_spin, 1, 2)
+        params_row1.setColumnStretch(0, 2)
+        params_row1.setColumnStretch(1, 3)
+        params_row1.setColumnStretch(2, 1)
+        options_card.body_layout.addLayout(params_row1)
+
+        params_row2 = QGridLayout()
+        params_row2.setContentsMargins(0, 0, 0, 0)
+        params_row2.setHorizontalSpacing(14)
+        params_row2.setVerticalSpacing(4)
+
+        lang_label = make_muted_label(
+            "Preferred audio language",
+            scale=0.9,
+            word_wrap=False,
+            parent=options_card,
+        )
+        self.lang_edit = QLineEdit(options_card)
+        self.lang_edit.setObjectName("inputs_lang_edit")
         self.lang_edit.setPlaceholderText("e.g., eng or jpn")
         self.lang_edit.setClearButtonEnabled(True)
         lang_label.setBuddy(self.lang_edit)
         self.lang_edit.setToolTip(
-            "Optional ISO 639-2 language code to prefer when choosing an audio stream."
+            "Optional ISO 639-2 language code to prefer when a video has multiple audio streams."
         )
         set_accessible(
             self.lang_edit,
             "Preferred audio language",
             "Optional preferred audio track language code, such as eng or jpn.",
         )
-        options_grid.addWidget(lang_label, 3, 2)
-        options_grid.addWidget(self.lang_edit, 3, 3)
 
-        stream_label = QLabel("Audio str&eam index:", options_group)
-        self.stream_spin = QSpinBox(options_group)
+        stream_label = make_muted_label(
+            "Audio str&eam index",
+            scale=0.9,
+            word_wrap=False,
+            parent=options_card,
+        )
+        self.stream_spin = QSpinBox(options_card)
+        self.stream_spin.setObjectName("inputs_stream_spin")
         self.stream_spin.setRange(-1, 63)
         self.stream_spin.setValue(-1)
         self.stream_spin.setSpecialValueText("Auto")
         stream_label.setBuddy(self.stream_spin)
         self.stream_spin.setToolTip(
-            "Explicit 0-based audio stream index (--stream), or Auto to select automatically."
+            "Explicit zero-based audio stream index, or Auto to pick the best audio stream."
         )
         set_accessible(
             self.stream_spin,
             "Audio stream index",
             "Explicit zero-based audio stream index, or Auto to pick automatically.",
         )
-        options_grid.addWidget(stream_label, 4, 0)
-        options_grid.addWidget(self.stream_spin, 4, 1)
 
-        self.reencode_checkbox = QCheckBox("Re-encode MP&3", options_group)
+        params_row2.addWidget(lang_label, 0, 0)
+        params_row2.addWidget(self.lang_edit, 1, 0)
+        params_row2.addWidget(stream_label, 0, 1)
+        params_row2.addWidget(self.stream_spin, 1, 1)
+        params_row2.setColumnStretch(0, 2)
+        params_row2.setColumnStretch(1, 1)
+        options_card.body_layout.addLayout(params_row2)
+
+        options_card.body_layout.addWidget(make_divider(options_card))
+
+        # Subsection 3: Balanced 2-row grid of boolean run flags (no 640 px overflow).
+        self.reencode_checkbox = QCheckBox("Re-encode MP&3", options_card)
+        self.reencode_checkbox.setObjectName("inputs_reencode_checkbox")
+        self.reencode_checkbox.setToolTip(
+            "Force re-encoding of embedded MP3 audio instead of copying the existing stream "
+            "unchanged."
+        )
         set_accessible(
             self.reencode_checkbox,
             "Re-encode MP3 streams",
             "Force re-encoding instead of stream-copying embedded MP3 audio.",
         )
-        self.normalize_checkbox = QCheckBox("Normali&ze loudness", options_group)
+        self.normalize_checkbox = QCheckBox("Normali&ze loudness", options_card)
+        self.normalize_checkbox.setObjectName("inputs_normalize_checkbox")
+        self.normalize_checkbox.setToolTip(
+            "Apply two-pass loudness normalization during audio extraction."
+        )
         set_accessible(
             self.normalize_checkbox,
             "Normalize loudness",
             "Apply two-pass FFmpeg loudnorm normalization during extraction.",
         )
-        self.artwork_checkbox = QCheckBox("Cover &art", options_group)
+        self.artwork_checkbox = QCheckBox("Embed cover &art", options_card)
+        self.artwork_checkbox.setObjectName("inputs_artwork_checkbox")
         self.artwork_checkbox.setChecked(True)
+        self.artwork_checkbox.setToolTip(
+            "Fetch and embed front-cover artwork inside exported MP3 files."
+        )
         set_accessible(
             self.artwork_checkbox,
             "Embed cover art",
             "Fetch and embed front-cover artwork into exported MP3 files.",
         )
-        self.flat_checkbox = QCheckBox("Flat la&yout", options_group)
+        self.flat_checkbox = QCheckBox("Flat la&yout", options_card)
+        self.flat_checkbox.setObjectName("inputs_flat_checkbox")
+        self.flat_checkbox.setToolTip(
+            "Write MP3 files directly into the output folder without Artist/Album subfolders."
+        )
         set_accessible(
             self.flat_checkbox,
             "Flat output layout",
             "Write MP3 files directly into the output root without Artist/Album folders.",
         )
-        self.fail_fast_checkbox = QCheckBox("Stop at first fail&ure", options_group)
+        self.fail_fast_checkbox = QCheckBox("Stop at first fail&ure", options_card)
+        self.fail_fast_checkbox.setObjectName("inputs_fail_fast_checkbox")
+        self.fail_fast_checkbox.setToolTip(
+            "Stop launching new track extractions as soon as any track fails."
+        )
         set_accessible(
             self.fail_fast_checkbox,
             "Stop at first failure",
-            "Stop starting remaining extractions after the first track failure (--fail-fast).",
+            "Stop starting remaining extractions after the first track failure.",
         )
 
-        flags_row1 = QHBoxLayout()
-        flags_row1.setSpacing(14)
-        flags_row1.addWidget(self.reencode_checkbox)
-        flags_row1.addWidget(self.normalize_checkbox)
-        flags_row1.addWidget(self.artwork_checkbox)
-        flags_row1.addWidget(self.flat_checkbox)
-        flags_row1.addWidget(self.fail_fast_checkbox)
-        flags_row1.addStretch(1)
-        options_grid.addLayout(flags_row1, 5, 0, 1, 4)
-        layout.addWidget(options_group)
+        flags_grid = QGridLayout()
+        flags_grid.setContentsMargins(0, 0, 0, 0)
+        flags_grid.setHorizontalSpacing(14)
+        flags_grid.setVerticalSpacing(8)
+        flags_grid.addWidget(self.reencode_checkbox, 0, 0)
+        flags_grid.addWidget(self.normalize_checkbox, 0, 1)
+        flags_grid.addWidget(self.artwork_checkbox, 0, 2)
+        flags_grid.addWidget(self.flat_checkbox, 1, 0)
+        flags_grid.addWidget(self.fail_fast_checkbox, 1, 1, 1, 2)
+        flags_grid.setColumnStretch(0, 1)
+        flags_grid.setColumnStretch(1, 1)
+        flags_grid.setColumnStretch(2, 1)
+        options_card.body_layout.addLayout(flags_grid)
+        layout.addWidget(options_card)
 
-        # Collapsible "Pin tags" section.
-        pin_container = QFrame(body)
+        # Collapsible "Pin tags" card styled to match elevated SectionCards.
+        pin_container = QFrame(column)
+        pin_container.setObjectName("inputs_pin_tags_card")
+        pin_container.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         pin_container.setFrameShape(QFrame.Shape.StyledPanel)
+        pin_container.setFrameShadow(QFrame.Shadow.Plain)
+        pin_container.setProperty("afvSurface", "card")
         pin_outer = QVBoxLayout(pin_container)
-        pin_outer.setContentsMargins(10, 6, 10, 8)
-        pin_outer.setSpacing(6)
+        pin_outer.setContentsMargins(16, 10, 16, 10)
+        pin_outer.setSpacing(8)
+
+        pin_header_row = QHBoxLayout()
+        pin_header_row.setContentsMargins(0, 0, 0, 0)
+        pin_header_row.setSpacing(6)
+
+        tag_icon = ThemedSvgLabel("tag", size=16, parent=pin_container)
+        tag_icon.setObjectName("inputs_pin_tags_icon")
+        pin_header_row.addWidget(tag_icon, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.pin_tags_toggle = QToolButton(pin_container)
+        self.pin_tags_toggle.setObjectName("inputs_pin_tags_toggle")
         self.pin_tags_toggle.setText("Pin ta&gs (optional overrides)")
         self.pin_tags_toggle.setCheckable(True)
         self.pin_tags_toggle.setChecked(False)
         self.pin_tags_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.pin_tags_toggle.setArrowType(Qt.ArrowType.RightArrow)
         self.pin_tags_toggle.setAutoRaise(True)
+        self.pin_tags_toggle.setProperty("afvRole", "disclosure")
+        self.pin_tags_toggle.setToolTip(
+            "Expand or collapse manual tag override fields applied to tracks in this run."
+        )
         set_accessible(
             self.pin_tags_toggle,
             "Pin tags section toggle",
             "Expand or collapse manual tag override fields.",
         )
-        pin_header_row = QHBoxLayout()
-        pin_header_row.setContentsMargins(0, 0, 0, 0)
-        pin_header_row.setSpacing(10)
         pin_header_row.addWidget(self.pin_tags_toggle)
-        self.pin_tags_hint_label = QLabel("", pin_container)
-        self.pin_tags_hint_label.setTextFormat(Qt.TextFormat.PlainText)
-        self.pin_tags_hint_label.setWordWrap(True)
+
+        self.pin_tags_hint_label = make_muted_label("", scale=0.88, parent=pin_container)
+        self.pin_tags_hint_label.setObjectName("inputs_pin_tags_hint_label")
+        self.pin_tags_hint_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         self.pin_tags_hint_label.setVisible(False)
         pin_header_row.addWidget(self.pin_tags_hint_label, stretch=1)
         pin_outer.addLayout(pin_header_row)
 
         self.pin_tags_content = QWidget(pin_container)
-        pin_form = QFormLayout(self.pin_tags_content)
-        pin_form.setContentsMargins(6, 4, 6, 4)
-        pin_form.setSpacing(6)
+        self.pin_tags_content.setObjectName("inputs_pin_tags_content")
+        pin_content_layout = QVBoxLayout(self.pin_tags_content)
+        pin_content_layout.setContentsMargins(0, 0, 0, 4)
+        pin_content_layout.setSpacing(8)
+        pin_content_layout.addWidget(make_divider(self.pin_tags_content))
 
+        pin_form = QFormLayout()
+        pin_form.setContentsMargins(4, 2, 4, 0)
+        pin_form.setHorizontalSpacing(12)
+        pin_form.setVerticalSpacing(8)
+        pin_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        pin_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        artist_label = QLabel("Artist:", self.pin_tags_content)
         self.artist_edit = QLineEdit(self.pin_tags_content)
+        self.artist_edit.setObjectName("inputs_artist_edit")
         self.artist_edit.setPlaceholderText("Optional artist override")
+        self.artist_edit.setClearButtonEnabled(True)
+        self.artist_edit.setToolTip("Override the artist tag for every track in this run.")
+        artist_label.setBuddy(self.artist_edit)
         set_accessible(
             self.artist_edit,
             "Pin artist tag",
             "Override the artist tag for every track in this run.",
         )
-        pin_form.addRow("Artist:", self.artist_edit)
+        pin_form.addRow(artist_label, self.artist_edit)
 
+        album_artist_label = QLabel("Album artist:", self.pin_tags_content)
         self.album_artist_edit = QLineEdit(self.pin_tags_content)
+        self.album_artist_edit.setObjectName("inputs_album_artist_edit")
         self.album_artist_edit.setPlaceholderText("Optional album artist override")
+        self.album_artist_edit.setClearButtonEnabled(True)
+        self.album_artist_edit.setToolTip(
+            "Override the album artist tag for every track in this run."
+        )
+        album_artist_label.setBuddy(self.album_artist_edit)
         set_accessible(
             self.album_artist_edit,
             "Pin album artist tag",
             "Override the album artist tag for every track in this run.",
         )
-        pin_form.addRow("Album artist:", self.album_artist_edit)
+        pin_form.addRow(album_artist_label, self.album_artist_edit)
 
+        album_label = QLabel("Album:", self.pin_tags_content)
         self.album_edit = QLineEdit(self.pin_tags_content)
+        self.album_edit.setObjectName("inputs_album_edit")
         self.album_edit.setPlaceholderText("Optional album override")
+        self.album_edit.setClearButtonEnabled(True)
+        self.album_edit.setToolTip("Override the album tag for every track in this run.")
+        album_label.setBuddy(self.album_edit)
         set_accessible(
             self.album_edit,
             "Pin album tag",
             "Override the album tag for every track in this run.",
         )
-        pin_form.addRow("Album:", self.album_edit)
+        pin_form.addRow(album_label, self.album_edit)
 
+        title_label = QLabel("Title:", self.pin_tags_content)
         self.title_edit = QLineEdit(self.pin_tags_content)
+        self.title_edit.setObjectName("inputs_title_edit")
         self.title_edit.setPlaceholderText("Single input only")
+        self.title_edit.setClearButtonEnabled(True)
+        self.title_edit.setToolTip(
+            "Override the track title tag when queuing a single file or single-file folder."
+        )
+        title_label.setBuddy(self.title_edit)
         set_accessible(
             self.title_edit,
             "Pin title tag",
             "Override the track title tag. Enabled when a single file or folder is selected.",
         )
-        pin_form.addRow("Title:", self.title_edit)
+        pin_form.addRow(title_label, self.title_edit)
 
+        track_label = QLabel("Track:", self.pin_tags_content)
         self.track_spin = QSpinBox(self.pin_tags_content)
+        self.track_spin.setObjectName("inputs_track_spin")
         self.track_spin.setRange(0, 999)
         self.track_spin.setValue(0)
         self.track_spin.setSpecialValueText("None")
+        self.track_spin.setMaximumWidth(120)
+        self.track_spin.setToolTip(
+            "Override the track number tag when queuing a single file or single-file folder."
+        )
+        track_label.setBuddy(self.track_spin)
         set_accessible(
             self.track_spin,
             "Pin track number",
             "Override the track number tag. Enabled when a single file or folder is selected.",
         )
-        pin_form.addRow("Track:", self.track_spin)
+        pin_form.addRow(track_label, self.track_spin)
 
-        self.single_file_hint_label = QLabel(
+        self.single_file_hint_label = make_muted_label(
             "Title and track number apply only to a single-file input.",
-            self.pin_tags_content,
+            scale=0.9,
+            parent=self.pin_tags_content,
         )
-        self.single_file_hint_label.setWordWrap(True)
+        self.single_file_hint_label.setObjectName("inputs_single_file_hint_label")
+        self.single_file_hint_label.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         pin_form.addRow("", self.single_file_hint_label)
 
+        pin_content_layout.addLayout(pin_form)
         self.pin_tags_content.setVisible(False)
         pin_outer.addWidget(self.pin_tags_content)
         layout.addWidget(pin_container)
 
-        # Primary footer action.
-        footer_row = QHBoxLayout()
-        footer_row.addStretch(1)
-        self.scan_button = QPushButton("&Scan and plan", body)
-        self.scan_button.setFont(make_bold_font(self.scan_button))
+        layout.addStretch(1)
+        scroll.setWidget(body)
+        outer_layout.addWidget(scroll, stretch=1)
+
+        # Sticky bottom action bar kept outside the scroll area so Scan and plan is always visible.
+        footer = ActionBarFooter(self, margins=(24, 10, 24, 12), spacing=12)
+        footer.setObjectName("inputs_footer_bar")
+        self._footer_summary_label = MiddleElideLabel("0 inputs queued · Online · 320k", footer)
+        self._footer_summary_label.setObjectName("inputs_footer_summary_label")
+        self._footer_summary_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._footer_summary_label.setProperty("afvText", "muted")
+        set_accessible(
+            self._footer_summary_label,
+            "Queued run summary",
+            "Live summary of queued input count, lookup mode, and audio quality.",
+        )
+        footer.content_layout.addWidget(self._footer_summary_label, stretch=1)
+
+        self.scan_button = QPushButton("&Scan and plan", footer)
+        self.scan_button.setObjectName("inputs_scan_button")
+        apply_primary_button_role(self.scan_button, icon_name="play")
+        self._scan_icon_active = self.scan_button.icon()
+        self._scan_icon_disabled = load_icon("play")
         self.scan_button.setDefault(True)
         self.scan_button.setEnabled(False)
+        self.scan_button.setIcon(self._scan_icon_disabled)
+        self.scan_button.setToolTip(
+            "Scan the queued files and folders and build an extraction plan."
+        )
         set_accessible(
             self.scan_button,
             "Scan and plan",
             "Discover audio tracks and build an extraction plan for the queued inputs.",
         )
-        footer_row.addWidget(self.scan_button)
-        layout.addLayout(footer_row)
-        layout.addStretch(1)
+        footer.content_layout.addWidget(self.scan_button)
+        outer_layout.addWidget(footer)
 
-        scroll.setWidget(body)
-        outer_layout.addWidget(scroll)
-
-        # Keyboard shortcut: Ctrl/Cmd+O opens the file chooser.
+        # Keyboard shortcuts: Ctrl/Cmd+O opens the file chooser; Delete/Backspace remove rows.
         self.open_files_shortcut = QShortcut(QKeySequence.StandardKey.Open, self)
         self.open_files_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self.open_files_shortcut.activated.connect(self._on_add_files)
+
+        self._delete_shortcut = QShortcut(QKeySequence.StandardKey.Delete, self.inputs_list)
+        self._delete_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._delete_shortcut.activated.connect(self.remove_selected)
+
+        self._backspace_shortcut = QShortcut(
+            QKeySequence(Qt.Key.Key_Backspace),
+            self.inputs_list,
+        )
+        self._backspace_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        self._backspace_shortcut.activated.connect(self.remove_selected)
 
         # Load initial defaults from controller.config and controller.offline_default.
         self.load_defaults(
@@ -865,7 +1183,7 @@ class InputsScreen(QWidget):
         self.recursive_checkbox.toggled.connect(self._clear_mode_notice)
         self.always_prompt_checkbox.toggled.connect(self._clear_mode_notice)
         self.keep_native_checkbox.toggled.connect(self._clear_mode_notice)
-        self.quality_combo.currentTextChanged.connect(self._clear_mode_notice)
+        self.quality_combo.currentTextChanged.connect(self._on_quality_changed)
         self.conflict_combo.currentIndexChanged.connect(self._clear_mode_notice)
         self.jobs_spin.valueChanged.connect(self._clear_mode_notice)
         self.lang_edit.textChanged.connect(self._clear_mode_notice)
@@ -894,12 +1212,12 @@ class InputsScreen(QWidget):
         # Logical tab order across interactive widgets.
         tab_chain: tuple[QWidget, ...] = (
             self.settings_button,
+            self.recursive_checkbox,
             self.inputs_list,
             self.add_files_button,
             self.add_folder_button,
             self.remove_button,
             self.clear_button,
-            self.recursive_checkbox,
             self.output_dir_edit,
             self.output_browse_button,
             self.output_reset_button,
@@ -942,6 +1260,20 @@ class InputsScreen(QWidget):
         """Clear and hide the brief mode-switch notice without affecting other banners."""
         self.mode_notice_banner.clear_message()
 
+    @Slot(str)
+    def _on_quality_changed(self, _text: str) -> None:
+        """Clear the mode notice and refresh the sticky footer summary text."""
+        self._clear_mode_notice()
+        self._update_footer_summary()
+
+    def _update_footer_summary(self) -> None:
+        """Refresh the live run summary displayed beside ``Scan and plan``."""
+        count = len(self._paths)
+        noun = "input" if count == 1 else "inputs"
+        mode = "Offline" if self.offline_radio.isChecked() else "Online"
+        quality = self.quality_combo.currentText().strip() or self._default_quality
+        self._footer_summary_label.setText(f"{count} {noun} queued · {mode} · {quality}")
+
     def _set_lookup_mode_offline(self, offline: bool) -> None:
         """Select the Offline or Online radio button and refresh dependent checkboxes."""
         if offline:
@@ -969,6 +1301,7 @@ class InputsScreen(QWidget):
             self._preflight_setup_error = ""
             self.config_warning_banner.clear_message()
         self._update_output_preview(config=config)
+        self._update_footer_summary()
 
     def load_defaults(
         self,
@@ -1144,6 +1477,7 @@ class InputsScreen(QWidget):
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         if _has_local_urls(event):
+            self.drop_zone.set_drag_active(True)
             event.acceptProposedAction()
         else:
             event.ignore()
@@ -1154,7 +1488,12 @@ class InputsScreen(QWidget):
         else:
             event.ignore()
 
+    def dragLeaveEvent(self, event: QDragLeaveEvent) -> None:
+        self.drop_zone.set_drag_active(False)
+        super().dragLeaveEvent(event)
+
     def dropEvent(self, event: QDropEvent) -> None:
+        self.drop_zone.set_drag_active(False)
         paths = _extract_dropped_paths(event)
         if paths:
             self.add_paths(paths)
@@ -1164,14 +1503,13 @@ class InputsScreen(QWidget):
 
     def _set_output_highlighted(self, highlighted: bool) -> None:
         self._output_highlighted = highlighted
+        set_widget_role(
+            self.output_frame,
+            "afvHighlight",
+            "warn" if highlighted else "none",
+        )
         if highlighted:
-            self.output_frame.setFrameShape(QFrame.Shape.Box)
-            self.output_frame.setFrameShadow(QFrame.Shadow.Plain)
-            self.output_frame.setLineWidth(2)
             self.output_dir_edit.setFocus()
-        else:
-            self.output_frame.setFrameShape(QFrame.Shape.NoFrame)
-            self.output_frame.setLineWidth(1)
 
     def _update_output_preview(self, *, config: object = _UNSET) -> None:
         active_config = self._controller.config if config is _UNSET else config
@@ -1182,23 +1520,32 @@ class InputsScreen(QWidget):
             active_config if isinstance(active_config, AppConfig) else None,
             is_dir_flags=self._path_is_dir,
         )
-        self.output_dir_edit.setPlaceholderText(preview)
         if explicit:
-            self.output_default_status.set_status("status_ok", f"Output folder: {explicit}")
+            self.output_dir_edit.setPlaceholderText("Leave blank to use default folder")
+            status_text = f"Output folder: {explicit}"
+            self.output_default_status.set_status("status_ok", status_text)
+            self.output_default_status.setToolTip(explicit)
         elif multi_root:
+            self.output_dir_edit.setPlaceholderText("Choose an output folder (required)")
             self.output_default_status.set_status("status_warn", preview)
+            self.output_default_status.setToolTip(preview)
         else:
+            self.output_dir_edit.setPlaceholderText("Leave blank to use default folder")
             self.output_default_status.set_status("status_info", preview)
+            self.output_default_status.setToolTip(preview)
 
     @Slot()
     def _update_action_states(self) -> None:
         has_items = len(self._paths) > 0
         has_selection = bool(self.inputs_list.selectedItems())
+        shortcut_label = _open_shortcut_text()
         self.remove_button.setEnabled(has_selection)
         self.clear_button.setEnabled(has_items)
         self.scan_button.setEnabled(has_items)
+        self.scan_button.setIcon(self._scan_icon_active if has_items else self._scan_icon_disabled)
+        self.inputs_list.updateGeometry()
         self.drop_hint_label.setText(
-            "Drop video files or folders here, or use Add files (Ctrl/Cmd+O) or Add folder."
+            f"Drop video files or folders here, or use Add files ({shortcut_label}) or Add folder."
             if not has_items
             else f"{len(self._paths)} input item{'s' if len(self._paths) != 1 else ''} queued. "
             "Drop more files or folders to add them."
@@ -1220,13 +1567,12 @@ class InputsScreen(QWidget):
             self.title_edit.setEnabled(True)
             self.track_spin.setEnabled(True)
             if self._path_is_dir[0]:
-                hint = (
+                self.single_file_hint_label.setText(
                     "Title and track number apply only if this folder resolves to a single "
                     "video file."
                 )
-                self.single_file_hint_label.setText(hint)
                 self.single_file_hint_label.setVisible(True)
-                self.pin_tags_hint_label.setText(hint)
+                self.pin_tags_hint_label.setText("Single folder queued")
                 self.pin_tags_hint_label.setVisible(True)
             else:
                 self.single_file_hint_label.setVisible(False)
@@ -1241,22 +1587,26 @@ class InputsScreen(QWidget):
             self.title_edit.setEnabled(False)
             self.track_spin.setEnabled(False)
             if self._cleared_single_track_notice:
-                hint = (
-                    "Title and track number apply only to a single-file input; cleared previous "
-                    "values because multiple inputs are queued."
+                self.pin_tags_hint_label.setText("Title and track cleared (multiple inputs)")
+                self.single_file_hint_label.setText(
+                    "Title and track number apply only to a single-file input; previous values "
+                    "were cleared."
                 )
             else:
-                hint = "Title and track number apply only to a single-file input."
-            self.single_file_hint_label.setText(hint)
+                self.pin_tags_hint_label.setText("Title and track disabled (multiple inputs)")
+                self.single_file_hint_label.setText(
+                    "Title and track number apply only to a single-file input."
+                )
             self.single_file_hint_label.setVisible(True)
-            self.pin_tags_hint_label.setText(hint)
             self.pin_tags_hint_label.setVisible(True)
+        self._update_footer_summary()
 
     @Slot(bool)
     def _on_mode_toggled(self, online_checked: bool) -> None:
         self.always_prompt_checkbox.setEnabled(online_checked)
         self.keep_native_checkbox.setEnabled(online_checked)
         self._clear_mode_notice()
+        self._update_footer_summary()
 
     @Slot(bool)
     def _on_pin_tags_toggled(self, expanded: bool) -> None:
@@ -1358,6 +1708,7 @@ class InputsScreen(QWidget):
                     "continue."
                 )
             self.output_default_status.set_status("status_error", text)
+            self.output_default_status.setToolTip(text)
         elif not text:
             text = "Check your selected inputs and options before continuing."
 
@@ -1479,3 +1830,13 @@ class InputsScreen(QWidget):
                 self._clear_mode_notice()
         elif config is not None:
             self._update_config_warning_banner(config)
+
+    def changeEvent(self, event: QEvent) -> None:
+        """Refresh themed SVG icons on live palette or style changes."""
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        ):
+            refresh_themed_widgets(self)

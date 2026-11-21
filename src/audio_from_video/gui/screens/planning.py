@@ -4,31 +4,40 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, QTimer, Slot
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from audio_from_video.events import LookupStats, TrackEvent, TrackStage
 from audio_from_video.gui.controller import ControllerState
-from audio_from_video.gui.resources import load_icon
 from audio_from_video.gui.screens._common import (
     IconStatusBanner,
+    MiddleElideLabel,
+    SectionCard,
     StatusLine,
+    ThemedSvgLabel,
+    apply_secondary_button_role,
     log_directory,
+    make_divider,
     make_heading_label,
+    make_mono_font,
+    make_muted_label,
     open_local_path,
     set_accessible,
 )
+from audio_from_video.gui.theme import set_widget_role
 
 if TYPE_CHECKING:
     from audio_from_video.gui.controller import RunController
@@ -63,62 +72,177 @@ class PlanningScreen(QWidget):
             "Displays media probing, metadata lookup progress, lookup statistics, and notices.",
         )
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
-        self.title_label = make_heading_label("Scanning and Planning", parent=self)
-        layout.addWidget(self.title_label)
+        scroll = QScrollArea(self)
+        scroll.setObjectName("planning_scroll_area")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        set_accessible(scroll, "Planning content", "Scrollable container for planning progress.")
+
+        body = QWidget(scroll)
+        body.setObjectName("planning_scroll_body")
+        body_v = QVBoxLayout(body)
+        body_v.setContentsMargins(24, 20, 24, 20)
+        body_v.setSpacing(0)
+        body_v.addStretch(1)
+
+        center_row = QHBoxLayout()
+        center_row.setContentsMargins(0, 0, 0, 0)
+        center_row.setSpacing(0)
+
+        card = SectionCard(
+            margins=(24, 22, 24, 20),
+            spacing=14,
+            parent=body,
+        )
+        card.setObjectName("planning_card")
+        card.setMinimumWidth(420)
+        card.setMaximumWidth(640)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
+        center_row.addStretch(0)
+        center_row.addWidget(card, stretch=1)
+        center_row.addStretch(0)
+        body_v.addLayout(center_row)
+        body_v.addStretch(1)
+
+        # Card header with heading and calm subtitle.
+        header_col = QVBoxLayout()
+        header_col.setContentsMargins(0, 0, 0, 0)
+        header_col.setSpacing(3)
+        self.title_label = make_heading_label("Scanning and Planning", parent=card)
+        self.title_label.setObjectName("planning_title_label")
+        subtitle = make_muted_label(
+            "Probing media files and looking up track metadata.",
+            parent=card,
+        )
+        subtitle.setObjectName("planning_subtitle_label")
+        header_col.addWidget(self.title_label)
+        header_col.addWidget(subtitle)
+        card.body_layout.addLayout(header_col)
+
+        # Compact, read-only 3-phase step strip so bar resets between phases make sense.
+        self._phase_labels: dict[str, QLabel] = {}
+        phase_row = QHBoxLayout()
+        phase_row.setContentsMargins(0, 0, 0, 0)
+        phase_row.setSpacing(6)
+        phase_specs: tuple[tuple[str, str], ...] = (
+            ("scan", "1. Scan"),
+            ("probe", "2. Probe"),
+            ("match", "3. Match"),
+        )
+        for idx, (key, caption) in enumerate(phase_specs):
+            if idx > 0:
+                sep = ThemedSvgLabel("chevron_right", size=10, parent=card)
+                sep.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+                phase_row.addWidget(sep, alignment=Qt.AlignmentFlag.AlignVCenter)
+            pill = QLabel(caption, card)
+            pill.setObjectName(f"planning_phase_{key}")
+            pill.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            pill.setTextFormat(Qt.TextFormat.PlainText)
+            pill.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            pill.setProperty("afvStepState", "active" if idx == 0 else "pending")
+            self._phase_labels[key] = pill
+            phase_row.addWidget(pill, alignment=Qt.AlignmentFlag.AlignVCenter)
+        phase_row.addStretch(1)
+        card.body_layout.addLayout(phase_row)
 
         # Notice banner area (displays outage warnings and provider notices).
-        self.notice_banner = IconStatusBanner(self)
-        layout.addWidget(self.notice_banner)
+        self.notice_banner = IconStatusBanner(card)
+        self.notice_banner.setObjectName("planning_notice_banner")
+        card.body_layout.addWidget(self.notice_banner)
 
-        # Progress group.
-        progress_group = QGroupBox("Progress", self)
-        progress_layout = QVBoxLayout(progress_group)
-        progress_layout.setSpacing(10)
+        # Live status, progress bar, and single-line middle-elided filename row.
+        progress_col = QVBoxLayout()
+        progress_col.setContentsMargins(0, 2, 0, 0)
+        progress_col.setSpacing(8)
 
-        self.status_line = StatusLine("status_working", "Scanning folders…", parent=progress_group)
-        progress_layout.addWidget(self.status_line)
+        self.status_line = StatusLine("status_working", "Scanning folders…", parent=card)
+        self.status_line.setObjectName("planning_status_line")
+        status_font = QFont(self.status_line.text_label.font())
+        status_font.setWeight(QFont.Weight.DemiBold)
+        self.status_line.text_label.setFont(status_font)
+        progress_col.addWidget(self.status_line)
 
-        self.progress_bar = QProgressBar(progress_group)
+        self.progress_bar = QProgressBar(card)
+        self.progress_bar.setObjectName("planning_progress_bar")
         self.progress_bar.setRange(0, 0)  # Indeterminate while folder discovery runs.
-        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setProperty("afvDensity", "compact")
         set_accessible(
             self.progress_bar,
             "Planning progress",
             "Scanning folders.",
         )
-        progress_layout.addWidget(self.progress_bar)
+        progress_col.addWidget(self.progress_bar)
 
-        self.detail_label = QLabel("", progress_group)
-        self.detail_label.setWordWrap(True)
-        self.detail_label.setTextFormat(Qt.TextFormat.PlainText)
-        progress_layout.addWidget(self.detail_label)
+        self.detail_label = MiddleElideLabel("", card)
+        self.detail_label.setObjectName("planning_detail_label")
+        self.detail_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.detail_label.setProperty("afvText", "muted")
+        set_accessible(
+            self.detail_label,
+            "Current track",
+            "Filename of the track currently being processed.",
+        )
+        progress_col.addWidget(self.detail_label)
+        card.body_layout.addLayout(progress_col)
 
-        self.stats_label = QLabel("Cache hits: 0 · MusicBrainz requests: 0", progress_group)
-        self.stats_label.setTextFormat(Qt.TextFormat.PlainText)
+        # Recessed stats footer strip inside the card.
+        stats_box = QFrame(card)
+        stats_box.setObjectName("planning_stats_box")
+        stats_box.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        stats_box.setFrameShape(QFrame.Shape.StyledPanel)
+        stats_box.setFrameShadow(QFrame.Shadow.Plain)
+        stats_box.setProperty("afvSurface", "card-inset")
+        stats_row = QHBoxLayout(stats_box)
+        stats_row.setContentsMargins(12, 8, 12, 8)
+        stats_row.setSpacing(8)
+
+        self.stats_label = make_muted_label(
+            "Cache hits: 0 · MusicBrainz requests: 0",
+            scale=0.92,
+            parent=stats_box,
+        )
+        self.stats_label.setObjectName("planning_stats_label")
         set_accessible(
             self.stats_label,
             "Lookup statistics",
             "Cache hits and outbound MusicBrainz request count for the current planning run.",
         )
-        progress_layout.addWidget(self.stats_label)
-        layout.addWidget(progress_group)
+        stats_row.addWidget(self.stats_label, stretch=1)
+        card.body_layout.addWidget(stats_box)
 
         # Optional error panel (for unexpected planning exceptions).
-        self.error_frame = QFrame(self)
+        self.error_frame = QFrame(card)
+        self.error_frame.setObjectName("planning_error_frame")
+        self.error_frame.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.error_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.error_frame.setFrameShadow(QFrame.Shadow.Plain)
+        self.error_frame.setProperty("afvBanner", True)
+        self.error_frame.setProperty("afvTone", "error")
         error_layout = QVBoxLayout(self.error_frame)
-        error_layout.setContentsMargins(12, 10, 12, 10)
+        error_layout.setContentsMargins(14, 12, 14, 12)
         error_layout.setSpacing(8)
-        self.error_header = StatusLine("status_error", "Planning failed", parent=self.error_frame)
+        self.error_header = StatusLine(
+            "status_error",
+            "Planning failed",
+            selectable=True,
+            parent=self.error_frame,
+        )
+        self.error_header.setObjectName("planning_error_header")
         error_layout.addWidget(self.error_header)
 
         self.error_details = QPlainTextEdit(self.error_frame)
+        self.error_details.setObjectName("planning_error_details")
         self.error_details.setReadOnly(True)
-        self.error_details.setMaximumHeight(120)
+        self.error_details.setProperty("afvReadonly", True)
+        self.error_details.setFont(make_mono_font(self.error_details))
+        self.error_details.setMaximumHeight(96)
+        self.error_details.setToolTip("Diagnostic details captured for the planning error.")
         set_accessible(
             self.error_details,
             "Planning error details",
@@ -127,21 +251,40 @@ class PlanningScreen(QWidget):
         error_layout.addWidget(self.error_details)
 
         err_buttons = QHBoxLayout()
+        err_buttons.setContentsMargins(0, 0, 0, 0)
+        err_buttons.setSpacing(8)
         self.copy_details_button = QPushButton("Copy &details", self.error_frame)
+        self.copy_details_button.setObjectName("planning_copy_details_button")
+        apply_secondary_button_role(self.copy_details_button, icon_name="copy")
+        self.copy_details_button.setToolTip(
+            "Copy the error summary and diagnostic details to the clipboard."
+        )
         set_accessible(
             self.copy_details_button,
             "Copy error details",
             "Copy the error message and details to the clipboard.",
         )
         self.open_log_button = QPushButton("Open &log folder", self.error_frame)
-        self.open_log_button.setIcon(load_icon("folder"))
+        self.open_log_button.setObjectName("planning_open_log_button")
+        apply_secondary_button_role(self.open_log_button, icon_name="folder")
+        self.open_log_button.setToolTip("Open the application log folder in your file manager.")
         set_accessible(
             self.open_log_button,
             "Open log folder",
             "Open the application log directory in the file manager.",
         )
+        self._copy_feedback_label = make_muted_label("", scale=0.88, parent=self.error_frame)
+        self._copy_feedback_label.setObjectName("planning_copy_feedback_label")
+        self._copy_feedback_label.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._copy_feedback_label.setVisible(False)
+        self._copy_feedback_timer = QTimer(self)
+        self._copy_feedback_timer.setSingleShot(True)
+        self._copy_feedback_timer.setInterval(2_500)
+        self._copy_feedback_timer.timeout.connect(self._clear_copy_feedback)
+
         err_buttons.addWidget(self.copy_details_button)
         err_buttons.addWidget(self.open_log_button)
+        err_buttons.addWidget(self._copy_feedback_label)
         err_buttons.addStretch(1)
         error_layout.addLayout(err_buttons)
 
@@ -150,8 +293,10 @@ class PlanningScreen(QWidget):
         self.log_feedback_label = StatusLine(
             "status_info",
             "",
+            selectable=True,
             parent=self.error_frame,
         )
+        self.log_feedback_label.setObjectName("planning_log_feedback_label")
         set_accessible(
             self.log_feedback_label,
             "Log folder feedback",
@@ -166,20 +311,32 @@ class PlanningScreen(QWidget):
         error_layout.addWidget(self.log_feedback_label)
 
         self.error_frame.setVisible(False)
-        layout.addWidget(self.error_frame)
+        card.body_layout.addWidget(self.error_frame)
 
-        # Cancel action bar.
+        # Card footer divider and Cancel action.
+        card.body_layout.addWidget(make_divider(card))
+
         footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
         footer.addStretch(1)
-        self.cancel_button = QPushButton("&Cancel", self)
+        self.cancel_button = QPushButton("&Cancel", card)
+        self.cancel_button.setObjectName("planning_cancel_button")
+        apply_secondary_button_role(self.cancel_button)
+        self.cancel_button.setToolTip(
+            "Stop probing and metadata lookup and return to the Inputs screen."
+        )
         set_accessible(
             self.cancel_button,
             "Cancel planning",
             "Stop probing and metadata lookup and return to the Inputs screen.",
         )
         footer.addWidget(self.cancel_button)
-        layout.addLayout(footer)
-        layout.addStretch(1)
+        card.body_layout.addLayout(footer)
+
+        scroll.setWidget(body)
+        outer_layout.addWidget(scroll)
+
+        self._set_phase("scan")
 
         # Wire widget events and controller signals via bound methods only.
         self.cancel_button.clicked.connect(self._on_cancel_clicked)
@@ -191,6 +348,7 @@ class PlanningScreen(QWidget):
         self._controller.notice.connect(self._on_notice)
         self._controller.state_changed.connect(self._on_state_changed)
 
+        self.setTabOrder(self.error_details, self.copy_details_button)
         self.setTabOrder(self.copy_details_button, self.open_log_button)
         self.setTabOrder(self.open_log_button, self.cancel_button)
 
@@ -204,10 +362,50 @@ class PlanningScreen(QWidget):
         """Return the most recent throttled accessibility progress description."""
         return self._last_announced_text
 
+    def _set_progress_density(self, *, indeterminate: bool) -> None:
+        """Switch the progress bar between compact indeterminate and labeled determinate style."""
+        if indeterminate:
+            self.progress_bar.setTextVisible(False)
+            set_widget_role(self.progress_bar, "afvDensity", "compact")
+        else:
+            self.progress_bar.setTextVisible(True)
+            set_widget_role(self.progress_bar, "afvDensity", "labeled")
+
+    def _set_phase(self, phase: str) -> None:
+        """Update the 3-step sub-phase indicator strip inside the planning card."""
+        steps: tuple[tuple[str, str, str], ...] = (
+            ("scan", "1. Scan", "Scan"),
+            ("probe", "2. Probe", "Probe"),
+            ("match", "3. Match", "Match"),
+        )
+        active_order = {"scan": 0, "probe": 1, "match": 2, "done": 3}
+        active_idx = active_order.get(phase, 0)
+        for idx, (key, numbered, short_name) in enumerate(steps):
+            pill = self._phase_labels[key]
+            if idx < active_idx:
+                pill.setText(f"✓ {short_name}")
+                set_widget_role(pill, "afvStepState", "done")
+            elif idx == active_idx:
+                pill.setText(numbered)
+                set_widget_role(pill, "afvStepState", "active")
+            else:
+                pill.setText(numbered)
+                set_widget_role(pill, "afvStepState", "pending")
+            pill.adjustSize()
+            pill.updateGeometry()
+
+    @Slot()
+    def _clear_copy_feedback(self) -> None:
+        """Hide the temporary clipboard copy confirmation label."""
+        self._copy_feedback_timer.stop()
+        self._copy_feedback_label.setText("")
+        self._copy_feedback_label.setVisible(False)
+
     def set_total_tracks(self, total: int | None) -> None:
         """Hint the total number of tracks being planned and switch to a determinate bar."""
         if total is not None and total > 0:
             self._expected_total = total
+            self._set_progress_density(indeterminate=False)
             if self._planned:
                 done = len(self._planned)
                 self.progress_bar.setRange(0, max(total, done))
@@ -252,12 +450,15 @@ class PlanningScreen(QWidget):
         self._last_announced_bucket = -1
         self._last_announced_text = ""
         self._cancelling = False
+        self._set_phase("scan")
         self.status_line.set_status("status_working", "Scanning folders…")
         self.detail_label.setText("")
         self.progress_bar.setRange(0, 0)
+        self._set_progress_density(indeterminate=True)
         self.progress_bar.setAccessibleDescription("Scanning folders.")
         self.stats_label.setText("Cache hits: 0 · MusicBrainz requests: 0")
         self.notice_banner.clear_message()
+        self._clear_copy_feedback()
         self._clear_log_feedback()
         self.error_details.clear()
         self.error_frame.setVisible(False)
@@ -268,6 +469,7 @@ class PlanningScreen(QWidget):
         heading = title.strip() or "Planning failed"
         self.error_header.set_status("status_error", heading)
         self.error_details.setPlainText(details)
+        self._clear_copy_feedback()
         self._clear_log_feedback()
         self.error_frame.setVisible(True)
 
@@ -306,6 +508,7 @@ class PlanningScreen(QWidget):
                     total_tracks = 0
                 if total_tracks > 0:
                     self.set_total_tracks(total_tracks)
+                    self._set_phase("probe")
                     self.progress_bar.setRange(0, total_tracks)
                     self.progress_bar.setValue(0)
                     self.status_line.set_status(
@@ -328,6 +531,8 @@ class PlanningScreen(QWidget):
             self._probed.add(event.index)
             total = self._effective_total()
             done = len(self._probed)
+            self._set_phase("probe")
+            self._set_progress_density(indeterminate=False)
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(min(done, total))
             self.status_line.set_status(
@@ -342,6 +547,8 @@ class PlanningScreen(QWidget):
             self._looked_up.add(event.index)
             total = self._effective_total()
             done = len(self._looked_up)
+            self._set_phase("match")
+            self._set_progress_density(indeterminate=False)
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(min(done, total))
             self.status_line.set_status(
@@ -353,6 +560,7 @@ class PlanningScreen(QWidget):
             return
 
         if stage == TrackStage.AWAITING_INPUT:
+            self._set_phase("match")
             self.status_line.set_status("status_info", "Waiting for your answer…")
             self.detail_label.setText(filename)
             return
@@ -361,11 +569,14 @@ class PlanningScreen(QWidget):
             self._planned.add(event.index)
             total = self._effective_total()
             done = len(self._planned)
+            self._set_phase("done" if done >= total else "match")
+            self._set_progress_density(indeterminate=False)
             self.progress_bar.setRange(0, total)
             self.progress_bar.setValue(min(done, total))
+            noun = "track" if total == 1 else "tracks"
             self.status_line.set_status(
                 "status_ok",
-                f"Planned {done} of {total} tracks.",
+                f"Planned {done} of {total} {noun}.",
             )
             self.detail_label.setText(filename)
             self._announce_progress(done, total, "Planning complete", force=True)
@@ -425,6 +636,9 @@ class PlanningScreen(QWidget):
         details = self.error_details.toPlainText()
         payload = f"{heading}\n\n{details}".strip() if details else heading
         clipboard.setText(payload)
+        self._copy_feedback_label.setText("Copied to clipboard")
+        self._copy_feedback_label.setVisible(True)
+        self._copy_feedback_timer.start()
 
     @Slot()
     def _on_open_log(self) -> None:
