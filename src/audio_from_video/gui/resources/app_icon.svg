@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Audio from Video">
+  <defs>
+    <linearGradient id="afvBg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="100%" stop-color="#1547A8"/>
+    </linearGradient>
+  </defs>
+  <rect x="1.5" y="1.5" width="21" height="21" rx="5.5" fill="url(#afvBg)"/>
+  <rect x="2" y="2" width="20" height="20" rx="5" fill="none" stroke="#FFFFFF" stroke-opacity="0.18" stroke-width="0.9"/>
+  <rect x="4.9" y="9.8" width="2" height="4.4" rx="1" fill="#BFDBFE"/>
+  <rect x="8" y="7.2" width="2" height="9.6" rx="1" fill="#FFFFFF"/>
+  <rect x="11" y="5.1" width="2" height="13.8" rx="1" fill="#FFFFFF"/>
+  <rect x="14" y="7.8" width="2" height="8.4" rx="1" fill="#E0EDFF"/>
+  <rect x="17.1" y="9.8" width="2" height="4.4" rx="1" fill="#BFDBFE"/>
+</svg>

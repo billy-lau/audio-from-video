@@ -27,9 +27,21 @@ except ImportError:  # pragma: no cover - shiboken6 is bundled with PySide6
     _shiboken_is_valid = None
 
 AVAILABLE_ICONS: tuple[str, ...] = (
+    "app_icon",
+    "arrow_left",
+    "check_mark",
+    "chevron_down",
+    "chevron_right",
+    "chevron_up",
+    "commentary",
+    "copy",
     "drop_zone",
     "file_add",
     "folder",
+    "play",
+    "refresh",
+    "save",
+    "search",
     "settings",
     "status_cancelled",
     "status_error",
@@ -41,7 +53,26 @@ AVAILABLE_ICONS: tuple[str, ...] = (
     "status_unmatched",
     "status_warn",
     "status_working",
+    "tag",
+    "trash",
 )
+
+# Dark-surface badge color swaps for semantic status icons. Each entry maps an
+# icon stem to ``(light_fill, dark_fill, dark_glyph)``; inside the SVG file the
+# inner glyph uses ``#FFFFFF`` so replacing ``#FFFFFF`` before the fill stays
+# collision-free and preserves WCAG 2.1 AA contrast on dark surfaces.
+_DARK_STATUS_SWAPS: dict[str, tuple[bytes, bytes, bytes]] = {
+    "status_ok": (b"#15803D", b"#4ADE80", b"#0B1912"),
+    "status_extract": (b"#1D5FD6", b"#60A5FA", b"#0A1426"),
+    "status_info": (b"#1E40AF", b"#7CB3FF", b"#0A1426"),
+    "status_working": (b"#0369A1", b"#38BDF8", b"#081A24"),
+    "status_warn": (b"#B45309", b"#FBBF24", b"#1F1503"),
+    "status_error": (b"#B91C1C", b"#F87171", b"#240A0B"),
+    "status_unmatched": (b"#6D28D9", b"#A78BFA", b"#150C2E"),
+    "status_pending": (b"#475569", b"#94A3B8", b"#0F172A"),
+    "status_cancelled": (b"#475569", b"#94A3B8", b"#0F172A"),
+    "status_skip": (b"#475569", b"#94A3B8", b"#0F172A"),
+}
 
 _HIGH_DPI_SIZES: tuple[int, ...] = (16, 20, 24, 32, 48)
 _RESOURCE_DIR = Path(__file__).resolve().parent
@@ -90,6 +121,25 @@ def clear_icon_caches() -> None:
 atexit.register(clear_icon_caches)
 
 
+def _is_dark_app_palette() -> bool:
+    """Return True when the active ``QGuiApplication`` window palette is dark."""
+    app = QGuiApplication.instance()
+    if isinstance(app, QGuiApplication):
+        window_color = app.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window)
+        if window_color.isValid():
+            return window_color.lightness() < 128
+    return False
+
+
+def _apply_status_dark_palette(stem: str, raw_svg: bytes) -> bytes:
+    """Rewrite a semantic ``status_*`` SVG payload for dark backgrounds."""
+    swap = _DARK_STATUS_SWAPS.get(stem)
+    if swap is None:
+        return raw_svg
+    light_fill, dark_fill, dark_glyph = swap
+    return raw_svg.replace(b"#FFFFFF", dark_glyph).replace(light_fill, dark_fill)
+
+
 def _cached_renderer(
     stem: str,
     *,
@@ -98,18 +148,20 @@ def _cached_renderer(
     has_current_color: bool,
 ) -> QSvgRenderer | None:
     """Return a cached valid ``QSvgRenderer`` for ``(stem, color_key)``."""
-    cache_key = (stem, color_key if has_current_color else "")
+    cache_key = (stem, color_key)
     with _CACHE_LOCK:
         cached = _RENDERER_CACHE.get(cache_key)
         if cached is not None:
             _RENDERER_CACHE.move_to_end(cache_key)
             return cached
 
-    payload = (
-        raw_svg.replace(b"currentColor", color_key.encode("ascii"))
-        if has_current_color
-        else raw_svg
-    )
+    if has_current_color and color_key:
+        payload = raw_svg.replace(b"currentColor", color_key.encode("ascii"))
+    elif color_key == "dark":
+        payload = _apply_status_dark_palette(stem, raw_svg)
+    else:
+        payload = raw_svg
+
     renderer = QSvgRenderer(QByteArray(payload))
     if not renderer.isValid():
         return None
@@ -170,7 +222,7 @@ def icon_path(name: str) -> Path:
     return candidate
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=128)
 def _read_svg_bytes(name: str) -> bytes:
     """Read raw SVG bytes for ``name`` from packaged data or sibling directory."""
     stem = _normalize_stem(name)
@@ -202,22 +254,42 @@ def _resolve_color_hex(
     color: QColor | str | None,
     *,
     mode: QIcon.Mode = QIcon.Mode.Normal,
+    color_role: QPalette.ColorRole | None = None,
 ) -> str:
-    """Return a ``#RRGGBB`` color string using ``color`` or the active system palette."""
+    """Return a ``#RRGGBB`` color string using ``color``, ``color_role``, or the palette."""
     explicit = _parse_explicit_color(color)
     if explicit is not None:
         return explicit
     app = QGuiApplication.instance()
     if isinstance(app, QGuiApplication):
-        group = (
-            QPalette.ColorGroup.Disabled
-            if mode == QIcon.Mode.Disabled
-            else QPalette.ColorGroup.Normal
-        )
-        palette_color = app.palette().color(group, QPalette.ColorRole.ButtonText)
+        palette = app.palette()
+        if mode == QIcon.Mode.Selected:
+            selected_color = palette.color(
+                QPalette.ColorGroup.Active,
+                QPalette.ColorRole.HighlightedText,
+            )
+            if selected_color.isValid():
+                return selected_color.name(QColor.NameFormat.HexRgb)
+        if mode == QIcon.Mode.Disabled:
+            disabled_color = palette.color(
+                QPalette.ColorGroup.Disabled,
+                QPalette.ColorRole.ButtonText,
+            )
+            if disabled_color.isValid():
+                return disabled_color.name(QColor.NameFormat.HexRgb)
+        role = QPalette.ColorRole.ButtonText if color_role is None else color_role
+        palette_color = palette.color(QPalette.ColorGroup.Normal, role)
         if palette_color.isValid():
             return palette_color.name(QColor.NameFormat.HexRgb)
     return _FALLBACK_COLOR_HEX
+
+
+def _status_color_key(stem: str, *, dark: bool | None = None) -> str:
+    """Return ``'dark'`` when a semantic status badge should use dark-mode fills."""
+    if stem not in _DARK_STATUS_SWAPS:
+        return ""
+    is_dark = _is_dark_app_palette() if dark is None else bool(dark)
+    return "dark" if is_dark else ""
 
 
 def _centered_square_rect(rect: QRectF) -> QRectF:
@@ -237,8 +309,11 @@ class SvgIconEngine(QIconEngine):
 
     Renders crisp vector icons at any requested size or device pixel ratio
     (including fractional scales such as 125%, 150%, and 175%) and tints
-    ``currentColor`` dynamically from ``QPalette.ColorRole.ButtonText`` at
+    ``currentColor`` dynamically from ``QPalette.ColorRole.ButtonText`` (or
+    ``QPalette.ColorRole.HighlightedText`` for ``QIcon.Mode.Selected``) at
     paint time so light, dark, and high-contrast themes update automatically.
+    Semantic ``status_*`` icons automatically swap to luminous dark-mode fills
+    whenever the active application window palette is dark.
     """
 
     def __init__(
@@ -247,11 +322,13 @@ class SvgIconEngine(QIconEngine):
         *,
         sizes: tuple[int, ...] = _HIGH_DPI_SIZES,
         color: QColor | str | None = None,
+        color_role: QPalette.ColorRole | None = None,
     ) -> None:
         super().__init__()
         self._name = _normalize_stem(name)
         self._sizes = tuple(max(1, int(s)) for s in sizes)
         self._fixed_color = _parse_explicit_color(color)
+        self._color_role = color_role
         # Validate eagerly that the bundled SVG resource exists and loads cleanly.
         self._raw_svg = _read_svg_bytes(self._name)
         self._has_current_color = b"currentColor" in self._raw_svg
@@ -291,11 +368,11 @@ class SvgIconEngine(QIconEngine):
 
     def _resolve_render_key(self, mode: QIcon.Mode) -> tuple[str, bool]:
         if not self._has_current_color:
-            return ("", mode == QIcon.Mode.Disabled)
+            return (_status_color_key(self._name), mode == QIcon.Mode.Disabled)
         color_hex = (
             self._fixed_color
             if self._fixed_color is not None
-            else _resolve_color_hex(None, mode=mode)
+            else _resolve_color_hex(None, mode=mode, color_role=self._color_role)
         )
         apply_fade = mode == QIcon.Mode.Disabled and self._fixed_color is not None
         return (color_hex, apply_fade)
@@ -393,7 +470,12 @@ class SvgIconEngine(QIconEngine):
         and dead entries are pruned automatically on subsequent clones and cache
         cleanup.
         """
-        cloned = SvgIconEngine(self._name, sizes=self._sizes, color=self._fixed_color)
+        cloned = SvgIconEngine(
+            self._name,
+            sizes=self._sizes,
+            color=self._fixed_color,
+            color_role=self._color_role,
+        )
         with _CACHE_LOCK:
             _ensure_post_routine()
             _prune_cloned_engines()
@@ -407,6 +489,7 @@ def render_svg_pixmap(
     *,
     device_pixel_ratio: float = 2.0,
     color: QColor | str | None = None,
+    dark: bool | None = None,
 ) -> QPixmap:
     """Render an SVG icon into a crisp high-DPI ``QPixmap`` using a cached renderer."""
     stem = _normalize_stem(name)
@@ -415,7 +498,10 @@ def render_svg_pixmap(
     logical = max(1, int(size))
     dpr = max(1.0, float(device_pixel_ratio))
     pixel_size = max(1, round(logical * dpr))
-    color_key = _resolve_color_hex(color) if has_current_color else ""
+    if has_current_color:
+        color_key = _resolve_color_hex(color)
+    else:
+        color_key = _status_color_key(stem, dark=dark)
     cache_key = (stem, pixel_size, pixel_size, round(dpr * 1000), color_key, False)
     cached = _get_cached_pixmap(cache_key)
     if cached is not None:
@@ -448,14 +534,16 @@ def load_icon(
     *,
     sizes: tuple[int, ...] = _HIGH_DPI_SIZES,
     color: QColor | str | None = None,
+    color_role: QPalette.ColorRole | None = None,
 ) -> QIcon:
     """Build a scalable ``QIcon`` rendered dynamically from ``resources/<name>.svg``.
 
     Uses :class:`SvgIconEngine` so Qt renders sharp vectors at arbitrary
     display scales (such as 100%, 125%, 150%, and 200%) and dynamically follows
-    ``QPalette.ColorRole.ButtonText`` for ``currentColor`` glyphs.
+    ``color_role`` (defaulting to ``QPalette.ColorRole.ButtonText``, or
+    ``HighlightedText`` when selected) for ``currentColor`` glyphs.
     """
-    return QIcon(SvgIconEngine(name, sizes=sizes, color=color))
+    return QIcon(SvgIconEngine(name, sizes=sizes, color=color, color_role=color_role))
 
 
 __all__ = [

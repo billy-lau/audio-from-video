@@ -210,6 +210,14 @@ class PlanTableModel(QAbstractTableModel):
         "Match",
         "Warnings",
     )
+    COLUMN_TOOLTIPS: tuple[str, ...] = (
+        "Current planning or extraction status for each track.",
+        "Source media filename (hover cells for the full path).",
+        "Planned MP3 destination path relative to the output folder.",
+        "Planned extraction, stream-copy, skip, or failure disposition.",
+        "Metadata match status, provenance, artist, and title.",
+        "Conflicts, warnings, or errors affecting this track.",
+    )
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -384,15 +392,18 @@ class PlanTableModel(QAbstractTableModel):
         orientation: Qt.Orientation,
         role: int = int(Qt.ItemDataRole.DisplayRole),
     ) -> object:
-        """Return column header labels and accessible metadata."""
+        """Return column header labels, alignment, tooltips, and accessible metadata."""
         if orientation == Qt.Orientation.Horizontal and 0 <= section < len(self.COLUMNS):
             label = self.COLUMNS[section]
             if role in (
                 int(Qt.ItemDataRole.DisplayRole),
-                int(Qt.ItemDataRole.ToolTipRole),
                 int(Qt.ItemDataRole.AccessibleTextRole),
             ):
                 return label
+            if role == int(Qt.ItemDataRole.ToolTipRole):
+                return self.COLUMN_TOOLTIPS[section]
+            if role == int(Qt.ItemDataRole.TextAlignmentRole):
+                return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         return None
 
     def data(
@@ -425,6 +436,9 @@ class PlanTableModel(QAbstractTableModel):
 
         if role == int(Qt.ItemDataRole.ToolTipRole):
             return self._tooltip_text(row, col, item)
+
+        if role == int(Qt.ItemDataRole.TextAlignmentRole):
+            return int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
         if role == int(Qt.ItemDataRole.AccessibleTextRole):
             header = self.COLUMNS[col]

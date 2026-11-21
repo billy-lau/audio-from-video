@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 from PySide6.QtCore import (
     QByteArray,
     QCoreApplication,
+    QEvent,
     QObject,
     QSettings,
     Qt,
@@ -62,11 +63,24 @@ from audio_from_video.gui.screens import (
     SummaryScreen,
 )
 from audio_from_video.gui.screens._common import (
+    SectionCard,
     StatusLine,
+    ThemedSvgLabel,
+    WorkflowHeader,
+    apply_ghost_button_role,
     log_directory,
+    make_bold_font,
     make_heading_label,
+    make_mono_font,
+    make_muted_label,
     open_local_path,
     set_accessible,
+)
+from audio_from_video.gui.theme import (
+    ThemeController,
+    install_theme,
+    refresh_themed_widgets,
+    repolish,
 )
 from audio_from_video.logging_setup import PACKAGE_LOGGER_NAME, configure_logging
 
@@ -86,8 +100,8 @@ _DEFAULT_WINDOW_WIDTH = 980
 _DEFAULT_WINDOW_HEIGHT = 720
 _MIN_WINDOW_WIDTH = 640
 _MIN_WINDOW_HEIGHT = 480
-_SETTINGS_DIALOG_WIDTH = 680
-_SETTINGS_DIALOG_HEIGHT = 620
+_SETTINGS_DIALOG_WIDTH = 720
+_SETTINGS_DIALOG_HEIGHT = 640
 _SETTINGS_DIALOG_MIN_WIDTH = 480
 _SETTINGS_DIALOG_MIN_HEIGHT = 360
 
@@ -508,6 +522,7 @@ class MainWindow(QMainWindow):
 
         self.setObjectName("main_window")
         self.setWindowTitle(APP_DISPLAY_NAME)
+        self.setWindowIcon(load_icon("app_icon"))
         self.setMinimumSize(_MIN_WINDOW_WIDTH, _MIN_WINDOW_HEIGHT)
         self.resize(_DEFAULT_WINDOW_WIDTH, _DEFAULT_WINDOW_HEIGHT)
         set_accessible(
@@ -519,12 +534,16 @@ class MainWindow(QMainWindow):
         # Single PlanTableModel shared by ReviewScreen and RunScreen (section 5.5).
         self.plan_model = PlanTableModel(self)
 
-        # Window central layout containing an optional inline error panel and stacked pages.
+        # Central layout: read-only workflow header, optional inline error panel, and pages.
         central = QWidget(self)
         central.setObjectName("central_container")
+        central.setProperty("afvSurface", "window")
         central_layout = QVBoxLayout(central)
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
+
+        self.workflow_header = WorkflowHeader(central)
+        central_layout.addWidget(self.workflow_header)
 
         self.error_panel = self._build_error_panel(central)
         central_layout.addWidget(self.error_panel)
@@ -601,57 +620,93 @@ class MainWindow(QMainWindow):
         """Create the lightweight startup check page shown during ``PREFLIGHT``."""
         page = QWidget(parent)
         page.setObjectName("preflight_screen")
+        page.setProperty("afvSurface", "window")
         set_accessible(
             page,
             "Startup check screen",
             "Checking configuration files and FFmpeg availability before starting.",
         )
 
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(32, 32, 32, 32)
-        layout.setSpacing(12)
-        layout.addStretch(1)
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(32, 32, 32, 32)
+        outer.setSpacing(0)
+        outer.addStretch(1)
 
-        title = make_heading_label(APP_DISPLAY_NAME, parent=page)
+        center_row = QHBoxLayout()
+        center_row.addStretch(1)
+
+        card = SectionCard(
+            margins=(36, 30, 36, 30),
+            spacing=10,
+            parent=page,
+        )
+        card.setObjectName("preflight_card")
+        card.setMinimumWidth(400)
+        card.setMaximumWidth(480)
+
+        self.preflight_icon = ThemedSvgLabel("app_icon", size=52, parent=card)
+        self.preflight_icon.setObjectName("preflight_icon_label")
+        card.body_layout.addWidget(self.preflight_icon, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        title = make_heading_label(APP_DISPLAY_NAME, scale=1.45, parent=card)
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(title)
+        card.body_layout.addWidget(title)
 
-        self.preflight_label = QLabel("Checking configuration and FFmpeg…", page)
+        self.preflight_label = make_muted_label(
+            "Checking configuration and FFmpeg…",
+            scale=0.96,
+            parent=card,
+        )
         self.preflight_label.setObjectName("preflight_status_label")
         self.preflight_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preflight_label.setWordWrap(True)
         set_accessible(
             self.preflight_label,
             "Startup check status",
             "Displays startup check progress while configuration and FFmpeg are inspected.",
         )
-        layout.addWidget(self.preflight_label)
+        card.body_layout.addWidget(self.preflight_label)
 
-        progress_row = QHBoxLayout()
-        progress_row.addStretch(1)
-        self.preflight_progress = QProgressBar(page)
+        card.body_layout.addSpacing(4)
+
+        self.preflight_progress = QProgressBar(card)
         self.preflight_progress.setObjectName("preflight_progress_bar")
         self.preflight_progress.setRange(0, 0)
         self.preflight_progress.setTextVisible(False)
+        self.preflight_progress.setProperty("afvDensity", "compact")
         self.preflight_progress.setMinimumWidth(240)
-        self.preflight_progress.setMaximumWidth(420)
+        self.preflight_progress.setMaximumWidth(360)
         set_accessible(
             self.preflight_progress,
             "Startup check progress",
             "Busy indicator shown while configuration and FFmpeg binaries are inspected.",
         )
-        progress_row.addWidget(self.preflight_progress)
-        progress_row.addStretch(1)
-        layout.addLayout(progress_row)
+        card.body_layout.addWidget(self.preflight_progress, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        layout.addStretch(1)
+        hint = make_muted_label(
+            "Verifying local tools, encoder support, and saved defaults.",
+            scale=0.85,
+            parent=card,
+        )
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        card.body_layout.addWidget(hint)
+
+        center_row.addWidget(card)
+        center_row.addStretch(1)
+        outer.addLayout(center_row)
+
+        outer.addStretch(1)
         return page
 
     def _build_error_panel(self, parent: QWidget) -> QFrame:
         """Create a dismissible top-level error panel for unexpected failures."""
         panel = QFrame(parent)
         panel.setObjectName("main_error_panel")
+        panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         panel.setFrameShape(QFrame.Shape.StyledPanel)
+        panel.setFrameShadow(QFrame.Shadow.Plain)
+        panel.setProperty("afvBanner", True)
+        panel.setProperty("afvTone", "error")
+        repolish(panel)
         set_accessible(
             panel,
             "Application error panel",
@@ -659,15 +714,23 @@ class MainWindow(QMainWindow):
         )
 
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setContentsMargins(18, 12, 18, 12)
         layout.setSpacing(8)
 
-        self.error_header = StatusLine("status_error", "Unexpected error", parent=panel)
+        self.error_header = StatusLine(
+            "status_error",
+            "Unexpected error",
+            icon_size=18,
+            selectable=True,
+            parent=panel,
+        )
+        self.error_header.text_label.setFont(make_bold_font(self.error_header.text_label))
         layout.addWidget(self.error_header)
 
         self.error_details = QPlainTextEdit(panel)
         self.error_details.setObjectName("main_error_details")
         self.error_details.setReadOnly(True)
+        self.error_details.setFont(make_mono_font(self.error_details))
         self.error_details.setMaximumHeight(120)
         set_accessible(
             self.error_details,
@@ -679,6 +742,10 @@ class MainWindow(QMainWindow):
         button_row = QHBoxLayout()
         button_row.setSpacing(8)
         self.copy_error_button = QPushButton("Copy &details", panel)
+        self.copy_error_button.setIcon(load_icon("copy"))
+        self.copy_error_button.setToolTip(
+            "Copy the error summary and diagnostic details to the clipboard."
+        )
         set_accessible(
             self.copy_error_button,
             "Copy error details",
@@ -686,12 +753,17 @@ class MainWindow(QMainWindow):
         )
         self.open_error_log_button = QPushButton("Open &log folder", panel)
         self.open_error_log_button.setIcon(load_icon("folder"))
+        self.open_error_log_button.setToolTip(
+            "Open the application log folder in the system file manager."
+        )
         set_accessible(
             self.open_error_log_button,
             "Open log folder",
             "Open the application log folder in the system file manager.",
         )
         self.dismiss_error_button = QPushButton("&Dismiss", panel)
+        apply_ghost_button_role(self.dismiss_error_button)
+        self.dismiss_error_button.setToolTip("Hide this error notice.")
         set_accessible(
             self.dismiss_error_button,
             "Dismiss error panel",
@@ -718,6 +790,7 @@ class MainWindow(QMainWindow):
         self.error_log_feedback_label.setVisible(False)
         layout.addWidget(self.error_log_feedback_label)
 
+        repolish(panel, include_children=True)
         panel.setVisible(False)
         return panel
 
@@ -805,12 +878,14 @@ class MainWindow(QMainWindow):
                 self.stack.setCurrentWidget(self.run_screen)
             elif self._last_active_state == ControllerState.PLANNING:
                 self.stack.setCurrentWidget(self.planning_screen)
+            self.workflow_header.update_state(state, last_active_state=self._last_active_state)
             return
 
         target = self._pages.get(state)
         if target is not None:
             self.stack.setCurrentWidget(target)
         self._last_active_state = state
+        self.workflow_header.update_state(state, last_active_state=self._last_active_state)
 
     def _update_settings_availability(self, state: ControllerState) -> None:
         enabled = self._can_open_settings(state)
@@ -880,6 +955,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("settings_dialog")
         dialog.setWindowTitle(f"Settings — {APP_DISPLAY_NAME}")
+        dialog.setWindowIcon(load_icon("app_icon"))
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
         dialog.setMinimumSize(_SETTINGS_DIALOG_MIN_WIDTH, _SETTINGS_DIALOG_MIN_HEIGHT)
         dialog.resize(_SETTINGS_DIALOG_WIDTH, _SETTINGS_DIALOG_HEIGHT)
@@ -1079,6 +1155,16 @@ class MainWindow(QMainWindow):
 
     # -- QWidget events -------------------------------------------------------
 
+    def changeEvent(self, event: QEvent) -> None:
+        """Refresh themed SVG pixmaps and primary icons on palette or style updates."""
+        super().changeEvent(event)
+        if event.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+            QEvent.Type.StyleChange,
+        ):
+            refresh_themed_widgets(self)
+
     def closeEvent(self, event: QCloseEvent) -> None:
         """Follow shutdown order (§4.5): persist UI state, stop workers, then quit."""
         self.save_window_settings()
@@ -1132,8 +1218,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     window: MainWindow | None = None
     qt_log_handler: QtLogHandler | None = None
     hooks: InstalledExceptionHooks | None = None
+    theme_controller: ThemeController | None = None
 
     try:
+        theme_controller = install_theme(app)
+        app.setWindowIcon(load_icon("app_icon"))
         _pkg_logger, qt_log_handler, active_log_file = configure_gui_logging()
         controller = RunController(app)
         window = MainWindow(
@@ -1159,6 +1248,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if controller is not None and qt_is_valid(controller):
             controller.deleteLater()
         app.processEvents()
+        if theme_controller is not None:
+            theme_controller.uninstall()
         teardown_gui_logging(qt_log_handler)
         app.setQuitOnLastWindowClosed(previous_quit_on_last)
         if owns_app:
