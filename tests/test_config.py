@@ -291,3 +291,12 @@ def test_loudnorm_config_range_validation(tmp_path: Path) -> None:
     bad_lra.write_text("[audio]\nloudnorm_lra = 0.0\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(config_path=bad_lra, env={})
+
+
+def test_non_utf8_config_raises_config_error(tmp_path: Path) -> None:
+    bad_utf8 = tmp_path / "bad_utf8.toml"
+    bad_utf8.write_bytes(b"\xff\xfe[audio]\n")
+    with pytest.raises(ConfigError, match="Failed to read config file"):
+        load_config(config_path=bad_utf8, env={})
+    with pytest.raises(ConfigError, match="Failed to read config file"):
+        save_mb_contact("alias@simplelogin.com", config_path=bad_utf8)

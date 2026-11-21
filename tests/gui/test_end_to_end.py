@@ -3344,7 +3344,13 @@ def test_e2e_invalid_config_banner_and_retry_reloads_defaults(
         assert not banner.isHidden()
         assert banner.text == "config.toml is invalid; using built-in defaults."
 
-        # Repair config.toml with custom defaults on disk.
+        # Return to SETUP while config.toml is still invalid, then repair and click Retry check.
+        win.inputs_screen.online_radio.setChecked(True)
+        win.inputs_screen.scan_button.click()
+        assert ctrl.state == ControllerState.SETUP
+        assert win.current_screen is win.setup_screen
+
+        # Repair config.toml with custom defaults on disk and click Retry check.
         config_file.write_text(
             "[musicbrainz]\n"
             f'contact = "{TEST_CONTACT_URL}"\n'
@@ -3359,12 +3365,6 @@ def test_e2e_invalid_config_banner_and_retry_reloads_defaults(
             "jobs = 2\n",
             encoding="utf-8",
         )
-
-        # Return to SETUP (missing contact on the stale fallback config), then click Retry check.
-        win.inputs_screen.online_radio.setChecked(True)
-        win.inputs_screen.scan_button.click()
-        assert ctrl.state == ControllerState.SETUP
-        assert win.current_screen is win.setup_screen
 
         win.setup_screen.retry_button.click()
         qtbot.waitUntil(lambda: ctrl.state == ControllerState.INPUTS, timeout=10_000)
@@ -3574,3 +3574,236 @@ def test_error_panel_open_log_folder_shows_and_clears_inline_feedback(
     assert win_default.error_panel.isHidden()
     assert win_default.error_log_feedback_label.isHidden()
     assert win_default.error_log_feedback_label.text() == ""
+
+
+def test_e2e_invalid_env_var_inputs_match_effective_config_and_run(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_env_and_no_network: dict[str, Path],
+) -> None:
+    """M5: invalid ``AFV_MB_CONTACT`` shows and uses saved ``config.toml`` defaults consistently."""
+    from audio_from_video.gui.screens.inputs import INVALID_ENV_WITH_FILE_BANNER_TEXT
+
+    ffmpeg_path = _assert_real_ffmpeg()
+    config_file = _isolated_env_and_no_network["config_file"]
+    cfg_out = tmp_path / "afv_cfg_out"
+    config_file.write_text(
+        "[binaries]\n"
+        f"ffmpeg = {_format_toml_path(ffmpeg_path)}\n"
+        "[audio]\n"
+        'quality = "192k"\n'
+        "[output]\n"
+        f"output_dir = {_format_toml_path(cfg_out)}\n"
+        "[execution]\n"
+        "jobs = 2\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFV_MB_CONTACT", "not-an-email")
+
+    video = make_video_with_audio(tmp_path / "m5_in" / "Artist - Track.mp4", duration=0.4)
+    ctrl = RunController(cache_dir=_isolated_env_and_no_network["cache_dir"])
+    _no_quit(ctrl)
+    win = MainWindow(ctrl)
+    qtbot.addWidget(win)
+    try:
+        win.show()
+        ctrl.start_preflight()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.SETUP, timeout=10_000)
+        assert ctrl.config is None
+
+        effective = ctrl.effective_config
+        assert effective.audio.quality == "192k"
+        assert effective.output.output_dir == str(cfg_out)
+        assert effective.execution.jobs == 2
+
+        win.setup_screen.offline_button.click()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.INPUTS, timeout=10_000)
+
+        # Widgets, output preview, and banner match the saved config.toml fallback.
+        assert win.inputs_screen.quality_combo.currentText() == "192k"
+        assert win.inputs_screen.jobs_spin.value() == 2
+        assert str(cfg_out) in win.inputs_screen.output_default_status.text
+        banner = win.inputs_screen.config_warning_banner
+        assert not banner.isHidden()
+        assert banner.text.startswith(INVALID_ENV_WITH_FILE_BANNER_TEXT)
+        assert "using built-in defaults" not in banner.text.casefold()
+        assert "AFV_MB_CONTACT" in banner.text
+
+        # Adding an input preserves the config output preview and produces matching options.
+        win.inputs_screen.add_paths([video])
+        assert str(cfg_out) in win.inputs_screen.output_default_status.text
+        opts = win.inputs_screen.build_run_options()
+        assert opts.quality is None  # matches effective 192k default
+        assert opts.jobs == 2
+        assert opts.output_dir is None
+
+        # Planning uses the exact same output_dir and quality shown on Inputs.
+        win.inputs_screen.scan_button.click()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.REVIEW, timeout=15_000)
+        assert ctrl.output_root == cfg_out.resolve()
+        assert len(ctrl.plan_items) == 1
+        item = ctrl.plan_items[0]
+        assert item.output_path is not None
+        assert item.output_path.resolve().is_relative_to(cfg_out.resolve())
+        assert item.extraction is not None
+        assert item.extraction.quality.label == "192k"
+    finally:
+        _cleanup_window(qtbot, win, ctrl)
+
+
+def test_e2e_external_config_edit_in_offline_mode_refreshes_inputs_before_run(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_env_and_no_network: dict[str, Path],
+) -> None:
+    """Low #3: editing ``config.toml`` externally updates ``Inputs`` before running."""
+    ffmpeg_path = _assert_real_ffmpeg()
+    config_file = _isolated_env_and_no_network["config_file"]
+    initial_out = tmp_path / "out_initial"
+    updated_out = tmp_path / "out_updated"
+    config_file.write_text(
+        "[binaries]\n"
+        f"ffmpeg = {_format_toml_path(ffmpeg_path)}\n"
+        "[audio]\n"
+        'quality = "320k"\n'
+        "[output]\n"
+        f"output_dir = {_format_toml_path(initial_out)}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFV_MB_CONTACT", "not-an-email")
+
+    video = make_video_with_audio(tmp_path / "ext_in" / "Artist - Track.mp4", duration=0.4)
+    ctrl = RunController(cache_dir=_isolated_env_and_no_network["cache_dir"])
+    _no_quit(ctrl)
+    win = MainWindow(ctrl)
+    qtbot.addWidget(win)
+    try:
+        win.show()
+        ctrl.start_preflight()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.SETUP, timeout=10_000)
+        win.setup_screen.offline_button.click()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.INPUTS, timeout=10_000)
+
+        assert win.inputs_screen.quality_combo.currentText() == "320k"
+        assert str(initial_out) in win.inputs_screen.output_default_status.text
+        win.inputs_screen.add_paths([video])
+
+        # Edit config.toml outside the app while staying on INPUTS.
+        config_file.write_text(
+            "[binaries]\n"
+            f"ffmpeg = {_format_toml_path(ffmpeg_path)}\n"
+            "[audio]\n"
+            'quality = "192k"\n'
+            "[output]\n"
+            f"output_dir = {_format_toml_path(updated_out)}\n",
+            encoding="utf-8",
+        )
+
+        # First Scan click refreshes Inputs and stays on INPUTS with an informational notice.
+        win.inputs_screen.scan_button.click()
+        assert ctrl.state == ControllerState.INPUTS
+        assert win.inputs_screen.quality_combo.currentText() == "192k"
+        assert str(updated_out) in win.inputs_screen.output_default_status.text
+        assert not win.inputs_screen.error_banner.isHidden()
+        assert win.inputs_screen.error_banner.icon_name == "status_info"
+        assert "changed outside the app" in win.inputs_screen.error_banner.text
+
+        # Second Scan click plans and matches the refreshed values shown on Inputs.
+        win.inputs_screen.scan_button.click()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.REVIEW, timeout=15_000)
+        assert ctrl.output_root == updated_out.resolve()
+        assert len(ctrl.plan_items) == 1
+        item = ctrl.plan_items[0]
+        assert item.output_path is not None
+        assert item.output_path.resolve().is_relative_to(updated_out.resolve())
+        assert item.extraction is not None
+        assert item.extraction.quality.label == "192k"
+    finally:
+        _cleanup_window(qtbot, win, ctrl)
+
+
+def test_e2e_external_config_edit_preserves_user_picked_options_on_pause(
+    qtbot: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _isolated_env_and_no_network: dict[str, Path],
+) -> None:
+    """User-picked per-run overrides survive external ``config.toml`` reload on Scan."""
+    ffmpeg_path = _assert_real_ffmpeg()
+    config_file = _isolated_env_and_no_network["config_file"]
+    initial_out = tmp_path / "out_a"
+    updated_out = tmp_path / "out_b"
+    config_file.write_text(
+        "[binaries]\n"
+        f"ffmpeg = {_format_toml_path(ffmpeg_path)}\n"
+        "[audio]\n"
+        'quality = "320k"\n'
+        "[output]\n"
+        f"output_dir = {_format_toml_path(initial_out)}\n"
+        "flat = false\n"
+        'on_conflict = "skip"\n'
+        "[execution]\n"
+        "jobs = 4\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFV_MB_CONTACT", "not-an-email")
+
+    video = make_video_with_audio(tmp_path / "edit_in" / "Artist - Track.mp4", duration=0.4)
+    ctrl = RunController(cache_dir=_isolated_env_and_no_network["cache_dir"])
+    _no_quit(ctrl)
+    win = MainWindow(ctrl)
+    qtbot.addWidget(win)
+    try:
+        win.show()
+        ctrl.start_preflight()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.SETUP, timeout=10_000)
+        win.setup_screen.offline_button.click()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.INPUTS, timeout=10_000)
+
+        # Pick custom per-run values for quality, on_conflict, and jobs; leave flat untouched.
+        win.inputs_screen.add_paths([video])
+        win.inputs_screen.quality_combo.setCurrentText("256k")
+        overwrite_idx = win.inputs_screen.conflict_combo.findData("overwrite")
+        assert overwrite_idx >= 0
+        win.inputs_screen.conflict_combo.setCurrentIndex(overwrite_idx)
+        win.inputs_screen.jobs_spin.setValue(5)
+        assert win.inputs_screen.flat_checkbox.isChecked() is False
+
+        # Edit config.toml externally to change ALL defaults.
+        config_file.write_text(
+            "[binaries]\n"
+            f"ffmpeg = {_format_toml_path(ffmpeg_path)}\n"
+            "[audio]\n"
+            'quality = "192k"\n'
+            "[output]\n"
+            f"output_dir = {_format_toml_path(updated_out)}\n"
+            "flat = true\n"
+            'on_conflict = "rename"\n'
+            "[execution]\n"
+            "jobs = 2\n",
+            encoding="utf-8",
+        )
+
+        # First Scan pauses on INPUTS: user-picked overrides survive while untouched flat and
+        # output preview adopt the new file defaults.
+        win.inputs_screen.scan_button.click()
+        assert ctrl.state == ControllerState.INPUTS
+        assert win.inputs_screen.quality_combo.currentText() == "256k"
+        assert win.inputs_screen.conflict_combo.currentData() == "overwrite"
+        assert win.inputs_screen.jobs_spin.value() == 5
+        assert win.inputs_screen.flat_checkbox.isChecked() is True
+        assert str(updated_out) in win.inputs_screen.output_default_status.text
+        assert win.inputs_screen.build_run_options().quality == "256k"
+
+        # Second Scan executes using the preserved 256k pick (not 192k).
+        win.inputs_screen.scan_button.click()
+        qtbot.waitUntil(lambda: ctrl.state == ControllerState.REVIEW, timeout=15_000)
+        assert ctrl.output_root == updated_out.resolve()
+        assert len(ctrl.plan_items) == 1
+        item = ctrl.plan_items[0]
+        assert item.extraction is not None
+        assert item.extraction.quality.label == "256k"
+    finally:
+        _cleanup_window(qtbot, win, ctrl)

@@ -79,6 +79,7 @@ from audio_from_video.gui.screens._common import (
 from audio_from_video.gui.screens.inputs import (
     INVALID_CONFIG_BANNER_TEXT,
     INVALID_ENV_CONFIG_BANNER_TEXT,
+    INVALID_ENV_WITH_FILE_BANNER_TEXT,
     INVALID_UNKNOWN_CONFIG_BANNER_TEXT,
     OFFLINE_SWITCH_NOTICE_TEXT,
 )
@@ -746,11 +747,20 @@ def test_inputs_screen_drag_drop_shortcut_options_and_pin_tags(
     assert screen.output_highlighted is False
     assert "No supported video files found" in screen.error_banner.text
 
-    # Unchanged default quality returns None so MP3 stream-copy is preserved.
+    # User-edited quality ("v0") survives a default change, while setting a new default
+    # on an untouched widget returns None so MP3 stream-copy is preserved.
     new_cfg = AppConfig()
     new_cfg.audio.quality = "192k"
     ctrl.settings_saved.emit(new_cfg)
-    assert screen.quality_combo.currentText() == "192k"
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.build_run_options().quality == "v0"
+
+    screen.quality_combo.setCurrentText("192k")
+    assert screen.build_run_options().quality is None
+    newer_cfg = AppConfig()
+    newer_cfg.audio.quality = "160k"
+    ctrl.settings_saved.emit(newer_cfg)
+    assert screen.quality_combo.currentText() == "160k"
     assert screen.build_run_options().quality is None
 
 
@@ -2362,16 +2372,28 @@ def test_inputs_screen_preserves_per_run_options_across_setup_detour(
     assert screen.stream_spin.value() == 1
     assert screen.fail_fast_checkbox.isChecked()
 
-    # An explicit Settings save DOES reload defaults from the updated config.
+    # An explicit Settings save preserves user-edited per-run picks ("v2", flat=True,
+    # OVERWRITE, jobs=5), and only updates widgets still equal to the prior default.
     updated_cfg = AppConfig()
     updated_cfg.audio.quality = "192k"
     updated_cfg.output.flat = False
     updated_cfg.execution.jobs = 4
     ctrl.settings_saved.emit(updated_cfg)
-    assert screen.quality_combo.currentText() == "192k"
-    assert not screen.flat_checkbox.isChecked()
-    assert screen.jobs_spin.value() == 4
+    assert screen.quality_combo.currentText() == "v2"
+    assert screen.flat_checkbox.isChecked()
+    assert screen.jobs_spin.value() == 5
     assert screen.offline_radio.isChecked()
+
+    # Reset back to the current defaults, then verify untouched fields follow a save.
+    screen.load_defaults(updated_cfg)
+    followup_cfg = AppConfig()
+    followup_cfg.audio.quality = "160k"
+    followup_cfg.output.flat = True
+    followup_cfg.execution.jobs = 3
+    ctrl.settings_saved.emit(followup_cfg)
+    assert screen.quality_combo.currentText() == "160k"
+    assert screen.flat_checkbox.isChecked()
+    assert screen.jobs_spin.value() == 3
 
 
 def test_inputs_screen_single_folder_overrides_and_cleared_hint(qtbot, tmp_path: Path) -> None:
@@ -3018,8 +3040,9 @@ def test_inputs_screen_reloads_defaults_after_retry_and_preserves_contact_or_ffm
     assert not screen.flat_checkbox.isChecked()
     assert screen.jobs_spin.value() == 6
 
-    # Re-entering after an actual Inputs-default change (e.g., Retry picked up quality="256k")
-    # reloads the new defaults from config.toml.
+    # Re-entering after an actual Inputs-default change (quality, on_conflict, and jobs)
+    # preserves user-edited quality="v0", flat=False, and jobs=6 while updating the
+    # untouched on_conflict widget (RENAME -> OVERWRITE).
     changed_cfg = AppConfig()
     changed_cfg.audio.quality = "256k"
     changed_cfg.output.flat = True
@@ -3028,13 +3051,14 @@ def test_inputs_screen_reloads_defaults_after_retry_and_preserves_contact_or_ffm
     ctrl.set_state(ControllerState.PREFLIGHT)
     ctrl.set_config(changed_cfg)
     ctrl.set_state(ControllerState.INPUTS)
-    assert screen.quality_combo.currentText() == "256k"
-    assert screen.flat_checkbox.isChecked()
+    assert screen.quality_combo.currentText() == "v0"
+    assert not screen.flat_checkbox.isChecked()
     assert screen.conflict_combo.currentData() == ConflictPolicy.OVERWRITE.value
-    assert screen.jobs_spin.value() == 3
+    assert screen.jobs_spin.value() == 6
 
-    # Transitioning from valid -> invalid -> recovered matching built-in defaults also reloads.
-    screen.quality_combo.setCurrentText("v4")
+    # Transitioning from valid -> invalid -> recovered updates an untouched field
+    # ("256k" -> "320k") while preserving a user-edited field.
+    screen.load_defaults(changed_cfg)
     ctrl.set_state(ControllerState.SETUP)
     ctrl.set_config(None)
     ctrl.set_offline_default(True)
@@ -3618,16 +3642,28 @@ def test_inputs_screen_settings_saved_preserves_per_run_options_and_mode(
     assert screen.jobs_spin.value() == 1
     assert screen.offline_radio.isChecked()
 
-    # 4. Real config default change (audio.quality 320k -> 192k) reloads defaults cleanly
-    # while still respecting the unchanged offline_default toggle.
+    # 4. Real config default change preserves user-edited overrides ("v0", jobs=1, flat=True),
+    # and updates widgets that still equal the prior saved default.
     quality_cfg = _base_config()
     quality_cfg.audio.quality = "192k"
     ctrl.set_config(quality_cfg)
     ctrl.settings_saved.emit(quality_cfg)
-    assert screen.quality_combo.currentText() == "192k"
-    assert screen.jobs_spin.value() == 4
-    assert not screen.flat_checkbox.isChecked()
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.build_run_options().quality == "v0"
+    assert screen.jobs_spin.value() == 1
+    assert screen.flat_checkbox.isChecked()
     assert screen.offline_radio.isChecked()
+
+    # An untouched jobs field tracks its default (4 -> 2) while an edited quality ("v0") survives.
+    screen.jobs_spin.setValue(4)
+    jobs_cfg = _base_config()
+    jobs_cfg.audio.quality = "192k"
+    jobs_cfg.execution.jobs = 2
+    ctrl.set_config(jobs_cfg)
+    ctrl.settings_saved.emit(jobs_cfg)
+    assert screen.jobs_spin.value() == 2
+    assert screen.quality_combo.currentText() == "v0"
+    assert screen.flat_checkbox.isChecked()
 
     # 5. Online user toggles "Start in offline mode" False -> True: flips to Offline,
     # keeping edited v0 and jobs=1 intact (and toggling True -> False flips back to Online).
@@ -3654,7 +3690,9 @@ def test_inputs_screen_settings_saved_preserves_per_run_options_and_mode(
     assert online_screen.quality_combo.currentText() == "v0"
     assert online_screen.jobs_spin.value() == 1
 
-    # 6. Changing audio.quality with offline_default unchanged keeps manual Offline toggle.
+    # 6. Changing audio.quality with offline_default unchanged keeps manual Offline toggle
+    # (updates untouched quality while preserving user-edited options).
+    online_screen.quality_combo.setCurrentText("320k")
     online_screen.offline_radio.setChecked(True)
     new_quality_cfg = _base_config()
     new_quality_cfg.audio.quality = "192k"
@@ -3851,7 +3889,8 @@ def test_invalid_env_override_banners_do_not_blame_config_toml(
     qtbot.addWidget(settings_valid)
 
     assert not inputs_valid.config_warning_banner.isHidden()
-    assert inputs_valid.config_warning_banner.text.startswith(INVALID_ENV_CONFIG_BANNER_TEXT)
+    assert inputs_valid.config_warning_banner.text.startswith(INVALID_ENV_WITH_FILE_BANNER_TEXT)
+    assert inputs_valid.quality_combo.currentText() == "192k"
     assert "AFV_MB_CONTACT" in inputs_valid.config_warning_banner.text
     assert "config.toml" not in inputs_valid.config_warning_banner.text.casefold()
 
@@ -3925,7 +3964,7 @@ def test_invalid_env_override_banners_do_not_blame_config_toml(
         settings_other = SettingsScreen(ctrl_other)
         qtbot.addWidget(inputs_other)
         qtbot.addWidget(settings_other)
-        assert inputs_other.config_warning_banner.text.startswith(INVALID_ENV_CONFIG_BANNER_TEXT)
+        assert inputs_other.config_warning_banner.text.startswith(INVALID_ENV_WITH_FILE_BANNER_TEXT)
         assert "AFV_OUTPUT_DIR" in inputs_other.config_warning_banner.text
         assert "itself is valid" in settings_other.status_banner.text
         assert "AFV_OUTPUT_DIR" in settings_other.status_banner.text
@@ -4014,18 +4053,18 @@ def test_invalid_utf8_config_and_preferences_saved_banner_refresh(
     corrupt_later.write_bytes(b"\xff\xfe[audio]\n")
     late_settings.refresh_env_overrides()
 
-    # Concurrent invalid UTF-8 during the second load_config call still blames config.toml.
+    # Concurrent file-read failure during the second load_config call blames config.toml.
     calls = 0
 
-    def _race_utf8(*, config_path=None, env=None):
+    def _race_oserror(*, config_path=None, env=None):
         nonlocal calls
         calls += 1
         if calls == 1:
             return AppConfig(config_path=config_path or corrupt_later)
-        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        raise OSError("transient read error")
 
     with monkeypatch.context() as scoped:
-        scoped.setattr(inputs_mod, "load_config", _race_utf8)
+        scoped.setattr(inputs_mod, "load_config", _race_oserror)
         assert (
             inputs_mod._invalid_config_banner_text(
                 show_when_none=True,
@@ -4231,3 +4270,95 @@ print("CLONE_OK")
         f"stdout={proc.stdout}\nstderr={proc.stderr}"
     )
     assert "CLONE_OK" in proc.stdout
+
+
+def test_planning_screen_set_phase_skips_unchanged_relayout(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``PlanningScreen._set_phase`` only touches phase pills when the phase changes."""
+    ctrl = FakeController(state=ControllerState.PLANNING)
+    screen = PlanningScreen(ctrl)
+    qtbot.addWidget(screen)
+
+    calls: list[str] = []
+    scan_pill = screen._phase_labels["scan"]
+    orig_adjust = scan_pill.adjustSize
+
+    def _spy_adjust() -> None:
+        calls.append("adjust")
+        orig_adjust()
+
+    monkeypatch.setattr(scan_pill, "adjustSize", _spy_adjust)
+
+    screen._set_phase("scan")
+    assert calls == []
+    screen._set_phase("probe")
+    assert len(calls) == 1
+    screen._set_phase("probe")
+    screen._set_phase("probe")
+    assert len(calls) == 1
+    screen._set_phase("match")
+    assert len(calls) == 2
+    screen._set_phase("done")
+    assert len(calls) == 3
+    screen.reset()
+    assert len(calls) == 4
+    assert scan_pill.property("afvStepState") == "active"
+
+
+def test_inputs_and_settings_read_config_toml_once_per_env_failure(
+    qtbot,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Nit 3: single GUI-thread ``load_config`` read per save/entry when ``AFV_*`` fails."""
+    import audio_from_video.gui.screens.inputs as inputs_mod
+    import audio_from_video.gui.screens.settings as settings_mod
+
+    cfg_path = tmp_path / "single_read.toml"
+    cfg_path.write_text(
+        '[audio]\nquality = "192k"\n[execution]\njobs = 2\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("AFV_MB_CONTACT", "not-an-email")
+
+    orig_load = inputs_mod.load_config
+    input_calls = 0
+    settings_calls = 0
+
+    def _count_inputs_load(*, config_path=None, env=None):
+        nonlocal input_calls
+        input_calls += 1
+        return orig_load(config_path=config_path, env=env)
+
+    def _count_settings_load(*, config_path=None, env=None):
+        nonlocal settings_calls
+        settings_calls += 1
+        return orig_load(config_path=config_path, env=env)
+
+    monkeypatch.setattr(inputs_mod, "load_config", _count_inputs_load)
+    monkeypatch.setattr(settings_mod, "load_config", _count_settings_load)
+
+    ctrl = FakeController(state=ControllerState.PREFLIGHT, config=None)
+    inputs_screen = InputsScreen(ctrl)
+    settings_screen = SettingsScreen(ctrl)
+    qtbot.addWidget(inputs_screen)
+    qtbot.addWidget(settings_screen)
+
+    # Initializing during PREFLIGHT reads nothing on InputsScreen; Settings reads once.
+    assert input_calls == 0
+    assert settings_calls == 1
+
+    # Entering INPUTS diagnoses config.toml in one read and applies saved defaults.
+    ctrl.set_state(ControllerState.SETUP)
+    ctrl.set_offline_default(True)
+    ctrl.set_state(ControllerState.INPUTS)
+    assert input_calls == 1
+    assert inputs_screen.quality_combo.currentText() == "192k"
+    assert inputs_screen.jobs_spin.value() == 2
+
+    # Saving emits settings_saved(None) -> at most one read on InputsScreen.
+    input_calls = 0
+    ctrl.settings_saved.emit(None)
+    assert input_calls == 1

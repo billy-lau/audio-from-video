@@ -35,7 +35,7 @@ from audio_from_video.gui.dialogs._common import (
     set_button_role,
 )
 from audio_from_video.gui.resources import load_icon
-from audio_from_video.gui.theme import refresh_themed_widgets, repolish
+from audio_from_video.gui.theme import is_theme_updating, refresh_themed_widgets, repolish
 from audio_from_video.presentation import format_edition_details, group_editions
 
 if TYPE_CHECKING:
@@ -488,18 +488,27 @@ class EditionDialog(QDialog):
         super().resizeEvent(event)
         self._sync_edition_column_width()
 
-    def changeEvent(self, event: QEvent) -> None:
-        """Refresh button icon contrast on live theme or palette changes."""
-        super().changeEvent(event)
-        if event.type() in (
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        ) and hasattr(self, "_use_selected_button"):
-            refresh_themed_widgets(self)
+    def _refresh_themed_visuals(self) -> None:
+        """Refresh the primary button icon contrast on theme updates."""
+        if hasattr(self, "_use_selected_button"):
             self._use_selected_button.setIcon(
                 dialog_button_icon("check_mark", on_primary=bool(self._editions))
             )
+
+    def changeEvent(self, event: QEvent) -> None:
+        """Refresh button icon contrast on live theme or palette changes."""
+        super().changeEvent(event)
+        if (
+            not is_theme_updating()
+            and event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+                QEvent.Type.StyleChange,
+            )
+            and hasattr(self, "_use_selected_button")
+        ):
+            refresh_themed_widgets(self)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         """Confirm the highlighted edition on Return/Enter while the table has focus."""

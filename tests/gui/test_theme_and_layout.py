@@ -21,6 +21,7 @@ from PySide6.QtCore import (
     QSettings,
     QSize,
     Qt,
+    qInstallMessageHandler,
 )
 from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtSvg import QSvgRenderer
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
@@ -50,7 +52,7 @@ from PySide6.QtWidgets import (
 
 from audio_from_video.binaries import BinaryResolution
 from audio_from_video.cache import NamespaceStats
-from audio_from_video.config import ENV_OVERRIDES, AppConfig
+from audio_from_video.config import ENV_OVERRIDES, AppConfig, MatchingConfig
 from audio_from_video.events import LookupStats, TrackEvent, TrackStage
 from audio_from_video.gui.app import (
     _DEFAULT_WINDOW_HEIGHT,
@@ -122,6 +124,7 @@ from audio_from_video.gui.theme import (
     install_theme,
     is_dark_palette,
     is_high_contrast_mode,
+    refresh_themed_widgets,
     relative_luminance,
     themed_button_icon,
 )
@@ -323,6 +326,7 @@ def theme_snapshot(qapp: QApplication) -> Iterator[Callable[[str], ThemeTokens]]
     prior_palette = QPalette(qapp.palette())
     prior_stylesheet = qapp.styleSheet()
     prior_icon = QIcon(qapp.windowIcon())
+    prior_hc_flag = qapp.property("_afvHighContrastActive")
 
     def _apply(mode: str) -> ThemeTokens:
         tokens = apply_theme(qapp, scheme=mode, high_contrast=False)
@@ -335,6 +339,7 @@ def theme_snapshot(qapp: QApplication) -> Iterator[Callable[[str], ThemeTokens]]
         existing_ctrl = getattr(qapp, "_afv_theme_controller", None)
         if existing_ctrl is not None and hasattr(existing_ctrl, "uninstall"):
             existing_ctrl.uninstall()
+        qapp.setProperty("_afvHighContrastActive", prior_hc_flag)
         qapp.setStyleSheet(prior_stylesheet)
         if prior_style_name:
             qapp.setStyle(prior_style_name)
@@ -1433,8 +1438,23 @@ def test_theme_tokens_meet_wcag_aa_contrast(tokens: ThemeTokens) -> None:
     assert contrast_ratio(tokens.accent_link, tokens.bg_window) >= 4.5
     assert contrast_ratio(tokens.accent_link, tokens.bg_surface) >= 4.5
 
-    # Selected row highlight legibility.
+    # Selected row highlight legibility and non-text surface separation (WCAG 1.4.11 >= 3.0:1).
     assert contrast_ratio(tokens.selection_fg, tokens.selection_bg) >= 4.5
+    assert contrast_ratio(tokens.selection_bg, tokens.bg_surface) >= 3.0
+    assert contrast_ratio(tokens.selection_bg, tokens.bg_surface_alt) >= 3.0
+    assert contrast_ratio(tokens.focus_on_accent, tokens.selection_bg) >= 3.5
+
+    # Keyboard focus rings on neutral surfaces and filled accent controls (WCAG 1.4.11 >= 3.0:1).
+    assert contrast_ratio(tokens.focus_ring, tokens.bg_surface) >= 3.0
+    assert contrast_ratio(tokens.focus_ring, tokens.bg_window) >= 3.0
+    assert contrast_ratio(tokens.focus_on_accent, tokens.accent_primary) >= 3.0
+    assert contrast_ratio(tokens.focus_on_accent, tokens.bg_surface) >= 3.0
+    assert contrast_ratio(tokens.focus_on_accent, tokens.bg_surface_alt) >= 3.0
+    assert contrast_ratio(tokens.focus_on_accent, tokens.bg_window) >= 3.0
+
+    # Danger ink and disabled ink contrast checks.
+    assert contrast_ratio(tokens.danger_fg, tokens.bg_surface) >= 4.5
+    assert contrast_ratio(tokens.text_disabled, tokens.bg_disabled) >= 3.0
 
     # All 7 semantic pill and banner palettes must stay sharply legible (>= 8.0:1!).
     for tone_name in _SEMANTIC_TONE_NAMES:
@@ -1473,6 +1493,7 @@ def test_apply_theme_and_controller_uninstall_restore_app(qapp: QApplication) ->
         ctrl.uninstall()
 
     assert qapp.styleSheet() == original_qss
+    assert qapp.property("_afvHighContrastActive") is None
     assert qapp.palette().color(QPalette.ColorRole.Window) == original_palette.color(
         QPalette.ColorRole.Window
     )
@@ -3248,27 +3269,1145 @@ def test_match_dialog_keeps_single_primary_cta_with_inline_form_open(
     assert dialog._use_selected_button.isDefault() is auto_accept
     assert dialog._fallback_button.isDefault() is (not auto_accept)
 
-    # Open inline Search again form with a valid title: only Run search is visually primary.
+    # Open inline Search again form with a valid title: only Run search is visually primary,
+    # and the Qt default button tracks the active inline submit action (not Use fallback).
     dialog._search_button.click()
     dialog._search_title_edit.setText("Jóga")
     _flush_layout(dialog)
     assert _visible_primary_buttons() == ["match_search_submit_button"]
-    # Safe default keyboard rule stays preserved on the footer buttons.
-    assert dialog._use_selected_button.isDefault() is auto_accept
-    assert dialog._fallback_button.isDefault() is (not auto_accept)
+    assert dialog._search_submit_button.isDefault() is True
+    assert dialog._use_selected_button.isDefault() is False
+    assert dialog._fallback_button.isDefault() is False
 
-    # Hiding Search again restores visual primary styling to the footer action.
+    # Hiding Search again restores visual primary styling and safe default state to footer actions.
     dialog._search_hide_button.click()
     _flush_layout(dialog)
     assert _visible_primary_buttons() == initial_primary
+    assert dialog._search_submit_button.isDefault() is False
+    assert dialog._use_selected_button.isDefault() is auto_accept
+    assert dialog._fallback_button.isDefault() is (not auto_accept)
 
     # Open inline Enter custom tags form with valid title: only Apply tags is visually primary.
     dialog._tags_button.click()
     dialog._tags_title_edit.setText("First Love")
     _flush_layout(dialog)
     assert _visible_primary_buttons() == ["match_tags_submit_button"]
+    assert dialog._tags_submit_button.isDefault() is True
+    assert dialog._use_selected_button.isDefault() is False
+    assert dialog._fallback_button.isDefault() is False
 
-    # Hiding Enter custom tags restores the footer primary action again.
+    # Hiding Enter custom tags restores the footer primary action and default state again.
     dialog._tags_hide_button.click()
     _flush_layout(dialog)
     assert _visible_primary_buttons() == initial_primary
+    assert dialog._tags_submit_button.isDefault() is False
+    assert dialog._use_selected_button.isDefault() is auto_accept
+    assert dialog._fallback_button.isDefault() is (not auto_accept)
+
+
+@pytest.mark.parametrize("auto_accept", [False, True], ids=["ambiguous", "auto_accept"])
+@pytest.mark.parametrize("form_kind", ["search", "tags"])
+def test_match_dialog_table_enter_with_open_inline_form_focuses_form(
+    qtbot: object,
+    theme_snapshot: Callable[[str], ThemeTokens],
+    auto_accept: bool,
+    form_kind: str,
+) -> None:
+    """Pressing Enter on the table while an inline form is open focuses the form safely."""
+    from PySide6.QtGui import QKeyEvent
+
+    theme_snapshot("light")
+    host_parent = QWidget()
+    qtbot.addWidget(host_parent)  # type: ignore[attr-defined]
+    decision = MatchDecision.AUTO_ACCEPT if auto_accept else MatchDecision.AMBIGUOUS
+    req = _make_match_request(decision=decision, always_prompt=auto_accept)
+    dialog = MatchDialog(req, host_parent)
+    qtbot.addWidget(dialog)  # type: ignore[attr-defined]
+    dialog.show()
+    dialog.activateWindow()
+    _flush_layout(dialog)
+
+    answers: list[object] = []
+    dialog.answered.connect(lambda _req_id, resp: answers.append(resp))
+
+    if form_kind == "search":
+        dialog._search_button.click()
+        dialog._search_title_edit.setText("Jóga")
+        expected_edit = dialog._search_title_edit
+    else:
+        dialog._tags_button.click()
+        dialog._tags_title_edit.setText("First Love")
+        expected_edit = dialog._tags_title_edit
+    _flush_layout(dialog)
+
+    # Move keyboard focus back onto the candidate table and press Return.
+    dialog._table.setFocus()
+    QApplication.processEvents()
+    press = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
+    QCoreApplication.sendEvent(dialog._table, press)
+    QApplication.processEvents()
+
+    assert answers == [], (
+        f"Unexpected dialog answer emitted while inline {form_kind} form was open."
+    )
+    assert dialog.isVisible() is True
+    assert expected_edit.text() in ("Jóga", "First Love")
+    assert dialog.focusWidget() is expected_edit
+    assert not dialog._use_selected_button.isDefault()
+    assert not dialog._fallback_button.isDefault()
+
+    # Dismissing the inline form restores the footer default button safely.
+    if form_kind == "search":
+        dialog._search_hide_button.click()
+    else:
+        dialog._tags_hide_button.click()
+    QApplication.processEvents()
+    assert dialog._use_selected_button.isDefault() is auto_accept
+    assert dialog._fallback_button.isDefault() is (not auto_accept)
+
+
+def _average_opaque_icon_hex(icon: QIcon, mode: QIcon.Mode, size: int = 24) -> str:
+    """Return the average ``#RRGGBB`` hex color of opaque pixels rendered by ``icon``."""
+    pix = icon.pixmap(QSize(size, size), mode, QIcon.State.Off)
+    img = pix.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+    samples: list[tuple[int, int, int]] = []
+    for y in range(img.height()):
+        for x in range(img.width()):
+            pixel = img.pixelColor(x, y)
+            if pixel.alpha() >= 180:
+                samples.append((pixel.red(), pixel.green(), pixel.blue()))
+    assert samples, f"Expected opaque icon pixels for mode {mode!r}, got an empty or faded pixmap."
+    avg_r = round(sum(p[0] for p in samples) / len(samples))
+    avg_g = round(sum(p[1] for p in samples) / len(samples))
+    avg_b = round(sum(p[2] for p in samples) / len(samples))
+    return f"#{avg_r:02X}{avg_g:02X}{avg_b:02X}"
+
+
+def _build_synthetic_hc_palette(
+    *,
+    bg_hex: str,
+    fg_hex: str,
+    highlight_hex: str,
+    highlighted_text_hex: str,
+    disabled_button_text_hex: str | None = None,
+) -> QPalette:
+    """Build a synthetic high-contrast ``QPalette`` for offline accessibility tests."""
+    pal = QPalette()
+    for role in (
+        QPalette.ColorRole.Window,
+        QPalette.ColorRole.Base,
+        QPalette.ColorRole.AlternateBase,
+        QPalette.ColorRole.Button,
+    ):
+        pal.setColor(role, QColor(bg_hex))
+    for role in (
+        QPalette.ColorRole.WindowText,
+        QPalette.ColorRole.Text,
+        QPalette.ColorRole.ButtonText,
+    ):
+        pal.setColor(role, QColor(fg_hex))
+    if disabled_button_text_hex is not None:
+        pal.setColor(
+            QPalette.ColorGroup.Disabled,
+            QPalette.ColorRole.ButtonText,
+            QColor(disabled_button_text_hex),
+        )
+    pal.setColor(QPalette.ColorRole.Highlight, QColor(highlight_hex))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor(highlighted_text_hex))
+    return pal
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_disabled_primary_button_icons_preserve_contrast_in_light_and_dark(
+    qtbot: object,
+    theme_snapshot: Callable[[str], ThemeTokens],
+    mode: str,
+) -> None:
+    """Primary CTA icons keep legible disabled ink before and after refresh."""
+    tokens = theme_snapshot(mode)
+    controller = FakeController(state=ControllerState.INPUTS, config=AppConfig())
+    window = MainWindow(controller=controller)
+    settings = SettingsScreen(controller=controller)
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    qtbot.addWidget(settings)  # type: ignore[attr-defined]
+
+    buttons = (
+        ("SetupScreen.save_contact_button", window.setup_screen.save_contact_button),
+        ("InputsScreen.scan_button", window.inputs_screen.scan_button),
+        ("ReviewScreen.start_button", window.review_screen.start_button),
+        ("SettingsScreen.save_button", settings.save_button),
+        ("SummaryScreen.new_batch_button", window.summary_screen.new_batch_button),
+    )
+
+    def _assert_button_icons(stage: str) -> None:
+        for label, btn in buttons:
+            normal_hex = _average_opaque_icon_hex(btn.icon(), QIcon.Mode.Normal)
+            disabled_hex = _average_opaque_icon_hex(btn.icon(), QIcon.Mode.Disabled)
+            normal_ratio = contrast_ratio(normal_hex, tokens.accent_primary)
+            disabled_ratio = contrast_ratio(disabled_hex, tokens.bg_disabled)
+            assert normal_ratio >= 4.5, (
+                f"[{mode}/{stage}] {label} Normal icon {normal_hex} contrast "
+                f"{normal_ratio:.2f}:1 against {tokens.accent_primary} is below 4.5:1."
+            )
+            assert disabled_hex == tokens.text_disabled.upper(), (
+                f"[{mode}/{stage}] {label} Disabled icon expected {tokens.text_disabled.upper()}, "
+                f"got {disabled_hex}."
+            )
+            assert disabled_ratio >= 3.0, (
+                f"[{mode}/{stage}] {label} Disabled icon {disabled_hex} contrast "
+                f"{disabled_ratio:.2f}:1 against {tokens.bg_disabled} is below 3.0:1."
+            )
+
+    _assert_button_icons("initial")
+    refresh_themed_widgets(window)
+    refresh_themed_widgets(settings)
+    _assert_button_icons("after_refresh")
+
+
+def test_live_light_to_high_contrast_switch_retints_primary_buttons(
+    qtbot: object,
+    qapp: QApplication,
+    tmp_path: Path,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """Switching Light to High Contrast refreshes primary icons without stale cached white ink."""
+    theme_snapshot("light")
+    controller = FakeController(state=ControllerState.SETUP, config=AppConfig())
+    window = MainWindow(controller=controller)
+    qtbot.addWidget(window)  # type: ignore[attr-defined]
+    window.show()
+    _flush_layout(window)
+
+    assert window.setup_screen.save_contact_button.isEnabled() is False
+    assert window.inputs_screen.scan_button.isEnabled() is False
+
+    # Switch live to a monochrome black high-contrast palette (yellow fill, black ink).
+    hc_black = _build_synthetic_hc_palette(
+        bg_hex="#000000",
+        fg_hex="#FFFFFF",
+        highlight_hex="#FFFF00",
+        highlighted_text_hex="#000000",
+    )
+    qapp.setPalette(hc_black)
+    apply_theme(qapp, scheme=None, high_contrast=True)
+    qapp.processEvents()
+
+    # Enable both buttons AFTER transitioning to High Contrast.
+    window.setup_screen.contact_edit.setText("relay@duck.com")
+    sample_video = tmp_path / "song.mp4"
+    sample_video.write_bytes(b"")
+    window.inputs_screen.add_paths([sample_video])
+    qapp.processEvents()
+
+    assert window.setup_screen.save_contact_button.isEnabled() is True
+    assert window.inputs_screen.scan_button.isEnabled() is True
+
+    setup_hex = _average_opaque_icon_hex(
+        window.setup_screen.save_contact_button.icon(),
+        QIcon.Mode.Normal,
+    )
+    scan_hex = _average_opaque_icon_hex(
+        window.inputs_screen.scan_button.icon(),
+        QIcon.Mode.Normal,
+    )
+    assert setup_hex == "#000000", f"Expected dark HighlightedText icon on Setup, got {setup_hex}."
+    assert scan_hex == "#000000", f"Expected dark HighlightedText icon on Inputs, got {scan_hex}."
+    assert contrast_ratio(setup_hex, "#FFFF00") >= 4.5
+    assert contrast_ratio(scan_hex, "#FFFF00") >= 4.5
+
+
+def test_explicit_high_contrast_aquatic_palette_uses_highlighted_text(
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """Explicit ``high_contrast=True`` uses ``HighlightedText`` on non-monochrome palettes."""
+    _ = theme_snapshot
+    aquatic = _build_synthetic_hc_palette(
+        bg_hex="#202020",
+        fg_hex="#FFFFFF",
+        highlight_hex="#8EE3F0",
+        highlighted_text_hex="#000000",
+        disabled_button_text_hex="#A6A6A6",
+    )
+    qapp.setPalette(aquatic)
+    apply_theme(qapp, scheme=None, high_contrast=True)
+    assert qapp.property("_afvHighContrastActive") is True
+
+    icon = themed_button_icon("play", on_primary=True)
+    normal_hex = _average_opaque_icon_hex(icon, QIcon.Mode.Normal)
+    disabled_hex = _average_opaque_icon_hex(icon, QIcon.Mode.Disabled)
+    assert normal_hex == "#000000"
+    assert contrast_ratio(normal_hex, "#8EE3F0") >= 4.5
+    assert disabled_hex == "#A6A6A6"
+    assert contrast_ratio(disabled_hex, "#202020") >= 3.0
+
+    # High-contrast stylesheet must explicitly style chip, segmented, and danger borders.
+    sheet = qapp.styleSheet()
+    assert 'QLabel[afvSurface="chip"]' in sheet
+    assert 'QFrame[afvSurface="segmented"]' in sheet
+    assert 'QPushButton[afvRole="danger"]' in sheet
+    assert 'QPushButton[afvRole="primary"]:disabled' in sheet
+
+
+def test_focus_on_accent_borders_render_with_zero_qss_warnings(
+    qtbot: object,
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """Filled accent controls show a contrasting focus border with zero Qt QSS parser warnings."""
+    _ = theme_snapshot
+    qt_warnings: list[str] = []
+
+    def _capture_qt_message(msg_type: object, _context: object, message: str) -> None:
+        if "Could not parse" in message or "stylesheet" in message.casefold():
+            qt_warnings.append(f"{msg_type}: {message}")
+
+    previous_handler = qInstallMessageHandler(_capture_qt_message)
+    try:
+        for mode, tokens in (("light", LIGHT_TOKENS), ("dark", DARK_TOKENS)):
+            apply_theme(qapp, scheme=mode, high_contrast=False)
+            assert contrast_ratio(tokens.focus_on_accent, tokens.accent_primary) >= 3.0
+            target = QColor(tokens.focus_on_accent)
+
+            host = QWidget()
+            qtbot.addWidget(host)  # type: ignore[attr-defined]
+            layout = QHBoxLayout(host)
+            sink = QPushButton("Sink", host)
+            primary_btn = QPushButton("Save", host)
+            primary_btn.setProperty("afvRole", "primary")
+            pill_btn = QPushButton("All", host)
+            pill_btn.setProperty("afvRole", "filter-pill")
+            pill_btn.setCheckable(True)
+            pill_btn.setChecked(True)
+            checkbox = QCheckBox("Chk", host)
+            checkbox.setChecked(True)
+            radio = QRadioButton("Rad", host)
+            radio.setChecked(True)
+            for child in (sink, primary_btn, pill_btn, checkbox, radio):
+                layout.addWidget(child)
+            host.resize(520, 80)
+            host.show()
+            host.activateWindow()
+            _flush_layout(host)
+
+            def _count_matching_pixels(
+                img: QImage,
+                expected: QColor,
+                *,
+                max_x: int | None = None,
+            ) -> int:
+                x_limit = img.width() if max_x is None else min(max_x, img.width())
+                return sum(
+                    1
+                    for y in range(img.height())
+                    for x in range(x_limit)
+                    if img.pixelColor(x, y).alpha() >= 200
+                    and abs(img.pixelColor(x, y).red() - expected.red()) <= 8
+                    and abs(img.pixelColor(x, y).green() - expected.green()) <= 8
+                    and abs(img.pixelColor(x, y).blue() - expected.blue()) <= 8
+                )
+
+            for name, widget, x_cap in (
+                ("primary", primary_btn, None),
+                ("filter-pill:checked", pill_btn, None),
+                ("checkbox:checked", checkbox, 22),
+                ("radio:checked", radio, 22),
+            ):
+                sink.setFocus(Qt.FocusReason.TabFocusReason)
+                qapp.processEvents()
+                unfocused_hits = _count_matching_pixels(
+                    widget.grab().toImage(), target, max_x=x_cap
+                )
+                widget.setFocus(Qt.FocusReason.TabFocusReason)
+                qapp.processEvents()
+                focused_hits = _count_matching_pixels(widget.grab().toImage(), target, max_x=x_cap)
+                assert focused_hits - unfocused_hits >= 80, (
+                    f"[{mode}] Expected visible {tokens.focus_on_accent} focus border on "
+                    f"{name}; unfocused={unfocused_hits}, focused={focused_hits}."
+                )
+
+        # Verify high-contrast stylesheet parses with zero warnings as well.
+        hc_pal = _build_synthetic_hc_palette(
+            bg_hex="#000000",
+            fg_hex="#FFFFFF",
+            highlight_hex="#FFFF00",
+            highlighted_text_hex="#000000",
+        )
+        qapp.setPalette(hc_pal)
+        apply_theme(qapp, scheme=None, high_contrast=True)
+        hc_widget = QPushButton("Check")
+        qtbot.addWidget(hc_widget)  # type: ignore[attr-defined]
+        hc_widget.setProperty("afvRole", "primary")
+        hc_widget.ensurePolished()
+        qapp.processEvents()
+    finally:
+        qInstallMessageHandler(previous_handler)
+
+    assert qt_warnings == [], f"Unexpected Qt stylesheet warnings: {qt_warnings}"
+
+
+def test_theme_controller_live_palette_and_contrast_signals_without_synthetic_event(
+    qtbot: object,
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """``ThemeController`` refreshes icons on raw ``setPalette``, tracks contrast, and cleans up."""
+    from shiboken6 import isValid as shiboken_is_valid
+
+    _ = theme_snapshot
+    controller = install_theme(qapp)
+    try:
+        win = MainWindow(
+            controller=FakeController(state=ControllerState.INPUTS, config=AppConfig())
+        )
+        qtbot.addWidget(win)  # type: ignore[attr-defined]
+        win.show()
+        _flush_layout(win)
+
+        drop_icon = win.inputs_screen.findChild(QLabel, "inputs_drop_icon")
+        assert drop_icon is not None
+        _cnt_l, light_lum = _image_opaque_luminance(drop_icon.pixmap().toImage())
+        assert light_lum < 0.15
+
+        # Raw app.setPalette without any synthetic sendEvent relies on ThemeController.eventFilter.
+        qapp.setPalette(build_palette(DARK_TOKENS))
+        qapp.processEvents()
+        _cnt_d, dark_lum = _image_opaque_luminance(drop_icon.pixmap().toImage())
+        assert dark_lum > 0.65, (
+            f"ThemeController.eventFilter failed to refresh drop icon; lum={dark_lum:.3f}."
+        )
+
+        # Contrast preference signal toggles high-contrast stylesheet live when exposed by Qt.
+        hints = qapp.styleHints()
+        assert hints is not None
+        accessibility = hints.accessibility()
+        high_contrast_enum = getattr(Qt, "ContrastPreference", None)
+        if accessibility is not None and high_contrast_enum is not None:
+            accessibility.contrastPreferenceChanged.emit(high_contrast_enum.HighContrast)
+            qapp.processEvents()
+            assert qapp.property("_afvHighContrastActive") is True
+            assert "High-Contrast Accessibility" in qapp.styleSheet()
+
+            accessibility.contrastPreferenceChanged.emit(high_contrast_enum.NoPreference)
+            qapp.processEvents()
+            assert qapp.property("_afvHighContrastActive") is False
+            assert "Studio Slate" in qapp.styleSheet()
+    finally:
+        controller.uninstall()
+        # Repeated uninstall calls must remain a safe no-op.
+        controller.uninstall()
+
+    assert qapp.property("_afvHighContrastActive") is None
+    qapp.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    qapp.processEvents()
+    assert shiboken_is_valid(controller) is False
+
+
+def test_danger_button_trash_icon_matches_danger_fg_ink(
+    qtbot: object,
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """``SettingsScreen.clear_cache_button`` tints its ``trash`` glyph to match label ink."""
+    theme_snapshot("light")
+    controller = FakeController(state=ControllerState.INPUTS, config=AppConfig())
+    settings = SettingsScreen(controller=controller)
+    qtbot.addWidget(settings)  # type: ignore[attr-defined]
+
+    light_hex = _average_opaque_icon_hex(settings.clear_cache_button.icon(), QIcon.Mode.Normal)
+    assert light_hex == LIGHT_TOKENS.danger_fg.upper()
+    assert contrast_ratio(light_hex, LIGHT_TOKENS.bg_surface) >= 4.5
+    light_dis_hex = _average_opaque_icon_hex(
+        settings.clear_cache_button.icon(),
+        QIcon.Mode.Disabled,
+    )
+    assert light_dis_hex == LIGHT_TOKENS.text_disabled.upper()
+
+    # Live switch to dark mode updates trash icon ink to DARK_TOKENS.danger_fg.
+    apply_theme(qapp, scheme="dark", high_contrast=False)
+    refresh_themed_widgets(settings)
+    dark_hex = _average_opaque_icon_hex(settings.clear_cache_button.icon(), QIcon.Mode.Normal)
+    assert dark_hex == DARK_TOKENS.danger_fg.upper()
+    assert contrast_ratio(dark_hex, DARK_TOKENS.bg_surface) >= 4.5
+    dark_dis_hex = _average_opaque_icon_hex(
+        settings.clear_cache_button.icon(),
+        QIcon.Mode.Disabled,
+    )
+    assert dark_dis_hex == DARK_TOKENS.text_disabled.upper()
+
+    # Live switch to high-contrast mode falls back to native ButtonText ink.
+    hc_black = _build_synthetic_hc_palette(
+        bg_hex="#000000",
+        fg_hex="#FFFFFF",
+        highlight_hex="#FFFF00",
+        highlighted_text_hex="#000000",
+    )
+    qapp.setPalette(hc_black)
+    apply_theme(qapp, scheme=None, high_contrast=True)
+    refresh_themed_widgets(settings)
+    hc_hex = _average_opaque_icon_hex(settings.clear_cache_button.icon(), QIcon.Mode.Normal)
+    assert hc_hex == "#FFFFFF"
+
+
+def test_match_dialog_score_tier_thresholds_align_with_matching_config() -> None:
+    """Cosmetic candidate score-tier icons align with ``MatchingConfig`` default thresholds."""
+    from audio_from_video.gui.dialogs.match import (
+        _SCORE_HIGH_THRESHOLD,
+        _SCORE_MEDIUM_THRESHOLD,
+        _score_tier_icon_name,
+    )
+
+    defaults = MatchingConfig()
+    assert defaults.auto_accept_score == pytest.approx(_SCORE_HIGH_THRESHOLD)
+    assert defaults.ambiguous_floor == pytest.approx(_SCORE_MEDIUM_THRESHOLD)
+    assert _score_tier_icon_name(0.85, auto_accepted=False) == "status_ok"
+    assert _score_tier_icon_name(0.82, auto_accepted=False) == "status_warn"
+    assert _score_tier_icon_name(0.50, auto_accepted=False) == "status_warn"
+    assert _score_tier_icon_name(0.49, auto_accepted=False) == "status_unmatched"
+    assert _score_tier_icon_name(0.40, auto_accepted=True) == "status_ok"
+
+
+def test_high_contrast_switch_restores_os_palette_and_leaves_hc_on_palette_change(
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """M1: light -> HC -> light restores the OS palette and exits HC stylesheet cleanly."""
+    _ = theme_snapshot
+    os_default = QPalette()
+    os_win = os_default.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name()
+    os_hl = os_default.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight).name()
+
+    # 1. Start in light Slate -> switch to high contrast -> restores OS palette roles.
+    apply_theme(qapp, "light", high_contrast=False)
+    assert (
+        qapp.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name().upper()
+        == LIGHT_TOKENS.bg_window
+    )
+    assert (
+        qapp.palette()
+        .color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight)
+        .name()
+        .upper()
+        == LIGHT_TOKENS.selection_bg
+    )
+
+    apply_theme(qapp, "light", high_contrast=True)
+    assert qapp.property("_afvHighContrastActive") is True
+    assert "High-Contrast Accessibility" in qapp.styleSheet()
+    assert qapp.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name() == (
+        os_win
+    )
+    assert (
+        qapp.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight).name()
+        == os_hl
+    )
+
+    # 2. Switch back to light Slate -> restores light tokens & stylesheet.
+    apply_theme(qapp, "light", high_contrast=False)
+    assert qapp.property("_afvHighContrastActive") is False
+    assert "Studio Slate" in qapp.styleSheet()
+    assert (
+        qapp.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name().upper()
+        == LIGHT_TOKENS.bg_window
+    )
+
+    # 3. ThemeController enters HC on extreme-contrast palette and exits when palette reverts.
+    ctrl = install_theme(qapp)
+    try:
+        hc_black = _build_synthetic_hc_palette(
+            bg_hex="#000000",
+            fg_hex="#FFFFFF",
+            highlight_hex="#FFFF00",
+            highlighted_text_hex="#000000",
+        )
+        qapp.setPalette(hc_black)
+        qapp.processEvents()
+        assert qapp.property("_afvHighContrastActive") is True
+        assert "High-Contrast Accessibility" in qapp.styleSheet()
+
+        # Calling _on_contrast_preference_changed(NoPreference) while stale hc_black is still
+        # on QApplication must still exit the HC stylesheet immediately.
+        hc_enum = getattr(Qt, "ContrastPreference", None)
+        if hc_enum is not None:
+            ctrl._on_contrast_preference_changed(hc_enum.NoPreference)
+            qapp.processEvents()
+            assert qapp.property("_afvHighContrastActive") is False
+            assert "Studio Slate" in qapp.styleSheet()
+
+        # Re-enter via monochrome palette, then leave via non-HC OS ApplicationPaletteChange.
+        qapp.setPalette(hc_black)
+        qapp.processEvents()
+        assert qapp.property("_afvHighContrastActive") is True
+
+        qapp.setPalette(QPalette())
+        qapp.processEvents()
+        assert qapp.property("_afvHighContrastActive") is False
+        assert "Studio Slate" in qapp.styleSheet()
+    finally:
+        ctrl.uninstall()
+
+
+def test_theme_controller_uninstall_restores_previous_qstyle(
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """L3: ``ThemeController.uninstall()`` restores the prior application ``QStyle``."""
+    from PySide6.QtWidgets import QStyleFactory
+
+    _ = theme_snapshot
+    style_names = QStyleFactory.keys()
+    non_fusion = next((k for k in style_names if k.casefold() != "fusion"), None)
+    if non_fusion is None:
+        pytest.skip("No alternative non-Fusion QStyle available in this Qt build.")
+
+    prior_style = qapp.style().name()
+    qapp.setStyleSheet("")
+    qapp.setStyle(non_fusion)
+    try:
+        ctrl = install_theme(qapp)
+        assert (qapp.style().name() or "").casefold() != non_fusion.casefold()
+        ctrl.uninstall()
+        assert (qapp.style().name() or "").casefold() == non_fusion.casefold()
+
+        # Also when a prior QSS stylesheet wraps the non-Fusion style before install().
+        prior_qss = "QLabel { color: red; }"
+        qapp.setStyle(non_fusion)
+        qapp.setStyleSheet(prior_qss)
+        ctrl_qss = install_theme(qapp)
+        assert ctrl_qss is not None
+        ctrl_qss.uninstall()
+        assert qapp.styleSheet() == prior_qss
+        qapp.setStyleSheet("")
+        assert (qapp.style().name() or "").casefold() == non_fusion.casefold()
+    finally:
+        qapp.setStyleSheet("")
+        match = next(
+            (k for k in style_names if k.casefold() == prior_style.casefold()),
+            None,
+        )
+        if match is not None:
+            qapp.setStyle(match)
+
+
+def test_delegates_honor_forced_high_contrast_app_property(
+    qapp: QApplication,
+    tmp_path: Path,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """L2: forced ``high_contrast=True`` applies HC palette colors inside table delegates."""
+    from PySide6.QtGui import QPainter
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+    from audio_from_video.gui.delegates import PaddedTextDelegate, StatusPillDelegate
+    from audio_from_video.gui.models.plan_table import COL_ACTION, COL_STATUS, PlanTableModel
+    from audio_from_video.gui.theme import is_high_contrast_active
+
+    _ = theme_snapshot
+    aquatic = _build_synthetic_hc_palette(
+        bg_hex="#202020",
+        fg_hex="#FFFFFF",
+        highlight_hex="#8EE3F0",
+        highlighted_text_hex="#000000",
+    )
+    qapp.setPalette(aquatic)
+    apply_theme(qapp, scheme=None, high_contrast=True)
+    assert is_high_contrast_active(app=qapp, palette=aquatic) is True
+
+    items = _make_bilingual_plan_items(tmp_path)
+    model = PlanTableModel()
+    model.set_output_root(tmp_path)
+    model.set_items(items)
+
+    pill_delegate = StatusPillDelegate()
+    text_delegate = PaddedTextDelegate()
+
+    for col, delegate in ((COL_STATUS, pill_delegate), (COL_ACTION, text_delegate)):
+        idx = model.index(0, col)
+        img = QImage(220, 40, QImage.Format.Format_RGBA8888)
+        img.fill(Qt.GlobalColor.transparent)
+        opt = QStyleOptionViewItem()
+        opt.rect = img.rect()
+        opt.palette = aquatic
+        opt.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Selected
+        painter = QPainter(img)
+        delegate.paint(painter, opt, idx)
+        painter.end()
+        # Right corner pixel outside the status pill and left accent bar uses the forced
+        # HC Highlight fill (#8EE3F0), never a Studio Slate background.
+        corner = img.pixelColor(img.width() - 3, 2).name().upper()
+        assert corner == "#8EE3F0", f"Delegate for col {col} painted {corner}, expected #8EE3F0."
+
+
+def test_apply_theme_walks_main_window_once_per_switch(
+    qtbot: object,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """L1: ``apply_theme`` refreshes ``MainWindow`` once instead of cascading on ``changeEvent``."""
+    import audio_from_video.gui.app as app_mod
+    import audio_from_video.gui.screens.inputs as inputs_mod
+    import audio_from_video.gui.theme as theme_mod
+
+    theme_snapshot("light")
+    win = MainWindow(controller=FakeController(state=ControllerState.INPUTS, config=AppConfig()))
+    qtbot.addWidget(win)  # type: ignore[attr-defined]
+    win.show()
+    _flush_layout(win)
+
+    walked: list[QWidget] = []
+    orig_refresh = theme_mod.refresh_themed_widgets
+
+    def _record_walk(root: QWidget) -> None:
+        walked.append(root)
+        orig_refresh(root)
+
+    monkeypatch.setattr(theme_mod, "refresh_themed_widgets", _record_walk)
+    monkeypatch.setattr(app_mod, "refresh_themed_widgets", _record_walk)
+    monkeypatch.setattr(inputs_mod, "refresh_themed_widgets", _record_walk)
+
+    apply_theme(qapp, "dark", high_contrast=False)
+    qapp.processEvents()
+
+    assert walked.count(win) == 1, f"Expected 1 MainWindow walk, got {walked.count(win)}."
+    assert walked.count(win.inputs_screen) == 0, (
+        f"Expected 0 redundant InputsScreen walks, got {walked.count(win.inputs_screen)}."
+    )
+
+
+@pytest.mark.parametrize(
+    "mode",
+    ["light", "dark", "hc_black", "hc_white", "hc_aquatic"],
+)
+def test_disabled_checkbox_and_radio_indicators_distinct_and_contrasting(
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+    mode: str,
+) -> None:
+    """M2: disabled checked, indeterminate, and unchecked indicators render >= 3:1 apart."""
+    from collections import Counter
+
+    _ = theme_snapshot
+    if mode in ("light", "dark"):
+        apply_theme(qapp, mode, high_contrast=False)
+    elif mode == "hc_black":
+        qapp.setPalette(
+            _build_synthetic_hc_palette(
+                bg_hex="#000000",
+                fg_hex="#FFFFFF",
+                highlight_hex="#FFFF00",
+                highlighted_text_hex="#000000",
+            )
+        )
+        apply_theme(qapp, scheme=None, high_contrast=True)
+    elif mode == "hc_white":
+        qapp.setPalette(
+            _build_synthetic_hc_palette(
+                bg_hex="#FFFFFF",
+                fg_hex="#000000",
+                highlight_hex="#00009F",
+                highlighted_text_hex="#FFFFFF",
+            )
+        )
+        apply_theme(qapp, scheme=None, high_contrast=True)
+    else:
+        qapp.setPalette(
+            _build_synthetic_hc_palette(
+                bg_hex="#202020",
+                fg_hex="#FFFFFF",
+                highlight_hex="#8EE3F0",
+                highlighted_text_hex="#000000",
+            )
+        )
+        apply_theme(qapp, scheme=None, high_contrast=True)
+
+    def _sample_indicator(widget: QWidget) -> list[str]:
+        widget.setFixedSize(28, 28)
+        widget.ensurePolished()
+        img = QImage(28, 28, QImage.Format.Format_RGBA8888)
+        img.fill(Qt.GlobalColor.transparent)
+        widget.render(img)
+        return [
+            img.pixelColor(x, y).name(QColor.NameFormat.HexRgb).upper()
+            for y in range(6, 22)
+            for x in range(2, 18)
+        ]
+
+    cb_unchecked = QCheckBox("")
+    cb_unchecked.setEnabled(False)
+    cb_checked = QCheckBox("")
+    cb_checked.setChecked(True)
+    cb_checked.setEnabled(False)
+    cb_indet = QCheckBox("")
+    cb_indet.setTristate(True)
+    cb_indet.setCheckState(Qt.CheckState.PartiallyChecked)
+    cb_indet.setEnabled(False)
+    rb_unchecked = QRadioButton("")
+    rb_unchecked.setEnabled(False)
+    rb_checked = QRadioButton("")
+    rb_checked.setChecked(True)
+    rb_checked.setEnabled(False)
+
+    px_cu = _sample_indicator(cb_unchecked)
+    px_cc = _sample_indicator(cb_checked)
+    px_ci = _sample_indicator(cb_indet)
+    px_ru = _sample_indicator(rb_unchecked)
+    px_rc = _sample_indicator(rb_checked)
+
+    assert px_cu != px_cc, f"[{mode}] Disabled checked/unchecked QCheckBox pixels are identical."
+    assert px_cu != px_ci, f"[{mode}] Disabled indeterminate/unchecked QCheckBox pixels match."
+    assert px_cc != px_ci, f"[{mode}] Disabled checked/indeterminate QCheckBox pixels match."
+    assert px_ru != px_rc, f"[{mode}] Disabled checked/unchecked QRadioButton pixels are identical."
+
+    cu_bg = Counter(px_cu).most_common(1)[0][0]
+    cc_bg = Counter(px_cc).most_common(1)[0][0]
+    ci_bg = Counter(px_ci).most_common(1)[0][0]
+    ru_bg = Counter(px_ru).most_common(1)[0][0]
+    rc_bg = Counter(px_rc).most_common(1)[0][0]
+
+    assert contrast_ratio(cu_bg, cc_bg) >= 3.0, f"[{mode}] QCheckBox fill ratio < 3:1."
+    assert contrast_ratio(cu_bg, ci_bg) >= 3.0, f"[{mode}] QCheckBox indet fill ratio < 3:1."
+    assert contrast_ratio(ru_bg, rc_bg) >= 3.0, f"[{mode}] QRadioButton fill ratio < 3:1."
+    assert max(contrast_ratio(c, cc_bg) for c in set(px_cc)) >= 3.0
+    assert max(contrast_ratio(c, ci_bg) for c in set(px_ci)) >= 3.0
+    assert max(contrast_ratio(c, rc_bg) for c in set(px_rc)) >= 3.0
+
+
+def test_stylesheet_uses_integer_border_widths_and_afv_readonly_selector(
+    qapp: QApplication,
+) -> None:
+    """L7: no fractional ``1.5px`` borders or fragile ``[readOnly="true"]`` QSS rules."""
+    _ = qapp
+    for tokens in (LIGHT_TOKENS, DARK_TOKENS):
+        sheet = build_stylesheet(tokens, high_contrast=False)
+        assert "1.5px" not in sheet
+        assert '[readOnly="true"]' not in sheet
+        assert '[afvReadonly="true"]' in sheet
+    hc_sheet = build_stylesheet(LIGHT_TOKENS, high_contrast=True)
+    assert "1.5px" not in hc_sheet
+
+
+@pytest.mark.parametrize("mode", ["light", "dark", "hc_black"])
+def test_delegates_paint_selected_accent_and_focus_ring_pixels(
+    qapp: QApplication,
+    tmp_path: Path,
+    theme_snapshot: Callable[[str], ThemeTokens],
+    mode: str,
+) -> None:
+    """M3: selected and focused table cells render contrasting borders and focus rings."""
+    from PySide6.QtGui import QPainter
+    from PySide6.QtWidgets import QStyle, QStyleOptionViewItem
+
+    from audio_from_video.gui.delegates import PaddedTextDelegate, StatusPillDelegate
+    from audio_from_video.gui.models.plan_table import COL_ACTION, COL_STATUS, PlanTableModel
+
+    _ = theme_snapshot
+    if mode == "light":
+        tokens = apply_theme(qapp, "light", high_contrast=False)
+        pal = build_palette(tokens)
+        expected_sel_bg = tokens.selection_bg.upper()
+        expected_focus_unsel = tokens.focus_ring.upper()
+        expected_focus_sel = tokens.focus_on_accent.upper()
+        expected_bar = tokens.focus_on_accent.upper()
+    elif mode == "dark":
+        tokens = apply_theme(qapp, "dark", high_contrast=False)
+        pal = build_palette(tokens)
+        expected_sel_bg = tokens.selection_bg.upper()
+        expected_focus_unsel = tokens.focus_ring.upper()
+        expected_focus_sel = tokens.focus_on_accent.upper()
+        expected_bar = tokens.focus_on_accent.upper()
+    else:
+        pal = _build_synthetic_hc_palette(
+            bg_hex="#000000",
+            fg_hex="#FFFFFF",
+            highlight_hex="#FFFF00",
+            highlighted_text_hex="#000000",
+        )
+        qapp.setPalette(pal)
+        apply_theme(qapp, scheme=None, high_contrast=True)
+        expected_sel_bg = "#FFFF00"
+        expected_focus_unsel = "#FFFF00"
+        expected_focus_sel = "#000000"
+        expected_bar = "#000000"
+
+    model = PlanTableModel()
+    model.set_output_root(tmp_path)
+    model.set_items(_make_bilingual_plan_items(tmp_path))
+
+    for col, delegate in (
+        (COL_STATUS, StatusPillDelegate()),
+        (COL_ACTION, PaddedTextDelegate()),
+    ):
+        idx = model.index(0, col)
+
+        # Focused (unselected) cell: crisp 2 px focus ring along the border.
+        img_focus = QImage(200, 36, QImage.Format.Format_RGBA8888)
+        img_focus.fill(Qt.GlobalColor.transparent)
+        opt_f = QStyleOptionViewItem()
+        opt_f.rect = img_focus.rect()
+        opt_f.palette = pal
+        opt_f.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_HasFocus
+        painter = QPainter(img_focus)
+        delegate.paint(painter, opt_f, idx)
+        painter.end()
+        assert img_focus.pixelColor(100, 0).name().upper() == expected_focus_unsel
+        assert img_focus.pixelColor(100, 1).name().upper() == expected_focus_unsel
+        assert img_focus.pixelColor(0, 18).name().upper() == expected_focus_unsel
+        assert img_focus.pixelColor(199, 18).name().upper() == expected_focus_unsel
+
+        # Selected + unfocused cell: high-contrast selection_bg + col 0 accent bar.
+        img_sel = QImage(200, 36, QImage.Format.Format_RGBA8888)
+        img_sel.fill(Qt.GlobalColor.transparent)
+        opt_s = QStyleOptionViewItem()
+        opt_s.rect = img_sel.rect()
+        opt_s.palette = pal
+        opt_s.state = QStyle.StateFlag.State_Enabled | QStyle.StateFlag.State_Selected
+        painter = QPainter(img_sel)
+        delegate.paint(painter, opt_s, idx)
+        painter.end()
+        assert img_sel.pixelColor(195, 18).name().upper() == expected_sel_bg
+        if col == 0:
+            assert img_sel.pixelColor(1, 18).name().upper() == expected_bar
+
+        # Selected + focused cell: contrasting 2 px focus_on_accent border over selection_bg.
+        img_sf = QImage(200, 36, QImage.Format.Format_RGBA8888)
+        img_sf.fill(Qt.GlobalColor.transparent)
+        opt_sf = QStyleOptionViewItem()
+        opt_sf.rect = img_sf.rect()
+        opt_sf.palette = pal
+        opt_sf.state = (
+            QStyle.StateFlag.State_Enabled
+            | QStyle.StateFlag.State_Selected
+            | QStyle.StateFlag.State_HasFocus
+        )
+        painter = QPainter(img_sf)
+        delegate.paint(painter, opt_sf, idx)
+        painter.end()
+        assert img_sf.pixelColor(100, 0).name().upper() == expected_focus_sel
+        assert img_sf.pixelColor(100, 35).name().upper() == expected_focus_sel
+
+
+def test_apply_theme_skips_redundant_set_style_and_event_filter_short_circuits(
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """Low #1 / Nit #2: skip redundant ``setStyle('Fusion')`` and ``property()`` lookups."""
+    import audio_from_video.gui.theme as theme_mod
+
+    theme_snapshot("light")
+    style_calls: list[object] = []
+    orig_set_style = qapp.setStyle
+    monkeypatch.setattr(
+        qapp, "setStyle", lambda style: (style_calls.append(style), orig_set_style(style))[1]
+    )
+
+    apply_theme(qapp, "dark", high_contrast=False)
+    apply_theme(qapp, "light", high_contrast=False)
+    apply_theme(qapp, "light", high_contrast=True)
+    apply_theme(qapp, "light", high_contrast=False)
+    assert style_calls == [], f"Unexpected redundant app.setStyle calls: {style_calls}"
+
+    # If external code switches QStyle while our stylesheet is active, apply_theme
+    # detects the replaced QStyle wrapper and restores Fusion on the next call.
+    from PySide6.QtWidgets import QStyleFactory
+
+    style_names = QStyleFactory.keys()
+    non_fusion = next((k for k in style_names if k.casefold() != "fusion"), None)
+    if non_fusion is not None:
+        orig_set_style(non_fusion)
+        apply_theme(qapp, "dark", high_contrast=False)
+        assert style_calls == ["Fusion"], (
+            f"Expected apply_theme to restore Fusion after setStyle({non_fusion!r}), "
+            f"got {style_calls!r}."
+        )
+        # Subsequent switch skips redundant setStyle again.
+        style_calls.clear()
+        apply_theme(qapp, "light", high_contrast=False)
+        assert style_calls == []
+
+    # eventFilter must not call is_theme_updating() for unrelated events.
+    ctrl = install_theme(qapp)
+    try:
+        probes = 0
+        orig_probe = theme_mod.is_theme_updating
+
+        def _spy_updating(app_arg=None):
+            nonlocal probes
+            probes += 1
+            return orig_probe(app_arg)
+
+        monkeypatch.setattr(theme_mod, "is_theme_updating", _spy_updating)
+        dummy = QWidget()
+        ctrl.eventFilter(dummy, QEvent(QEvent.Type.ApplicationPaletteChange))
+        ctrl.eventFilter(qapp, QEvent(QEvent.Type.UpdateRequest))
+        assert probes == 0
+    finally:
+        ctrl.uninstall()
+
+
+def test_undelegated_item_base_rules_reserve_transparent_focus_border() -> None:
+    """Nit #3: transparent 2 px item border prevents 1-2 px text shift on focus."""
+    for tokens in (LIGHT_TOKENS, DARK_TOKENS):
+        sheet = build_stylesheet(tokens, high_contrast=False)
+        assert "border: 2px solid transparent;" in sheet
+    hc_sheet = build_stylesheet(LIGHT_TOKENS, high_contrast=True)
+    assert "border: 2px solid transparent;" in hc_sheet
+
+
+def test_apply_theme_detaches_prior_stylesheet_skips_noop_and_preserves_focus(
+    qtbot: object,
+    qapp: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """``apply_theme`` detaches active QSS before switching, skips no-ops, and preserves focus."""
+    from PySide6.QtCore import QObject
+    from PySide6.QtWidgets import QStyleFactory
+
+    theme_snapshot("light")
+    editor = QLineEdit("/tmp/sample-folder")
+    qtbot.addWidget(editor)  # type: ignore[attr-defined]
+    editor.show()
+    editor.setFocus()
+    editor.setSelection(5, 6)
+    qapp.processEvents()
+
+    qss_calls: list[int] = []
+    style_calls: list[object] = []
+    pal_calls: list[QPalette] = []
+    orig_set_qss = qapp.setStyleSheet
+    orig_set_style = qapp.setStyle
+    orig_set_pal = qapp.setPalette
+
+    monkeypatch.setattr(
+        qapp,
+        "setStyleSheet",
+        lambda sheet: (qss_calls.append(len(sheet)), orig_set_qss(sheet))[1],
+    )
+    monkeypatch.setattr(
+        qapp,
+        "setStyle",
+        lambda style: (style_calls.append(style), orig_set_style(style))[1],
+    )
+    monkeypatch.setattr(
+        qapp,
+        "setPalette",
+        lambda pal: (pal_calls.append(pal), orig_set_pal(pal))[1],
+    )
+
+    # 1. Exact no-op re-apply skips setStyleSheet, setStyle, and setPalette.
+    apply_theme(qapp, "light", high_contrast=False)
+    assert qss_calls == []
+    assert style_calls == []
+    assert pal_calls == []
+
+    # 2. Same-scheme re-apply still repairs an external palette drift.
+    drifted = QPalette(qapp.palette())
+    drifted.setColor(QPalette.ColorGroup.Active, QPalette.ColorRole.Window, QColor("#123456"))
+    orig_set_pal(drifted)
+    apply_theme(qapp, "light", high_contrast=False)
+    assert qss_calls == []
+    assert len(pal_calls) == 1
+    assert (
+        qapp.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name().upper()
+        == LIGHT_TOKENS.bg_window
+    )
+    pal_calls.clear()
+
+    # 3. Same-scheme re-apply still repairs an external QStyle swap.
+    style_names = QStyleFactory.keys()
+    non_fusion = next((k for k in style_names if k.casefold() != "fusion"), None)
+    if non_fusion is not None:
+        orig_set_style(non_fusion)
+        apply_theme(qapp, "light", high_contrast=False)
+        assert style_calls == ["Fusion"]
+        assert qss_calls == []
+        style_calls.clear()
+
+    # 4. Switching light -> dark detaches with "" before applying the new stylesheet,
+    # emits no synchronous Paint events between calls, and preserves editor focus/selection.
+    class _PaintSpy(QObject):
+        def __init__(self) -> None:
+            super().__init__()
+            self.paints = 0
+
+        def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+            _ = watched
+            if event.type() == QEvent.Type.Paint:
+                self.paints += 1
+            return False
+
+    spy = _PaintSpy()
+    qapp.installEventFilter(spy)
+    try:
+        apply_theme(qapp, "dark", high_contrast=False)
+        assert spy.paints == 0
+    finally:
+        qapp.removeEventFilter(spy)
+
+    assert style_calls == []
+    assert len(qss_calls) == 2 and qss_calls[0] == 0 and qss_calls[1] > 0
+    assert qapp.focusWidget() is editor
+    assert editor.selectedText() == "sample"
+    assert editor.cursorPosition() == 11
+
+
+def test_high_contrast_live_palette_switch_refreshes_cached_qss_brushes(
+    qtbot: object,
+    qapp: QApplication,
+    theme_snapshot: Callable[[str], ThemeTokens],
+) -> None:
+    """High-contrast transitions refresh cached Qt ``palette(...)`` brushes and glyph polarity."""
+    _ = theme_snapshot
+    btn = QPushButton("Primary")
+    btn.setProperty("afvRole", "primary")
+    btn.resize(120, 36)
+    qtbot.addWidget(btn)  # type: ignore[attr-defined]
+    btn.show()
+
+    hc_black = _build_synthetic_hc_palette(
+        bg_hex="#000000",
+        fg_hex="#FFFFFF",
+        highlight_hex="#FFFF00",
+        highlighted_text_hex="#000000",
+    )
+    hc_aquatic = _build_synthetic_hc_palette(
+        bg_hex="#202020",
+        fg_hex="#FFFFFF",
+        highlight_hex="#8EE3F0",
+        highlighted_text_hex="#000000",
+    )
+    hc_white = _build_synthetic_hc_palette(
+        bg_hex="#FFFFFF",
+        fg_hex="#000000",
+        highlight_hex="#00009F",
+        highlighted_text_hex="#FFFFFF",
+    )
+
+    # Identical stylesheet text (both dark-glyph highlighted text) must still repaint brush.
+    qapp.setPalette(hc_black)
+    apply_theme(qapp, scheme=None, high_contrast=True)
+    qapp.processEvents()
+    assert btn.grab().toImage().pixelColor(10, 10).name().upper() == "#FFFF00"
+
+    qapp.setPalette(hc_aquatic)
+    apply_theme(qapp, scheme=None, high_contrast=True)
+    qapp.processEvents()
+    assert btn.grab().toImage().pixelColor(10, 10).name().upper() == "#8EE3F0"
+
+    # Live ThemeController HC Black -> HC White switches cached highlight and indicator glyph.
+    apply_theme(qapp, "light", high_contrast=False)
+    ctrl = install_theme(qapp)
+    try:
+        qapp.setPalette(hc_black)
+        qapp.processEvents()
+        assert "ui_check_dark" in qapp.styleSheet()
+        assert btn.grab().toImage().pixelColor(10, 10).name().upper() == "#FFFF00"
+
+        qapp.setPalette(hc_white)
+        qapp.processEvents()
+        assert "ui_check_white" in qapp.styleSheet()
+        assert btn.grab().toImage().pixelColor(10, 10).name().upper() == "#00009F"
+    finally:
+        ctrl.uninstall()

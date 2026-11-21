@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -115,8 +115,36 @@ def _extract_raw_binary_path(
     return None
 
 
-def _fallback_config_with_raw_binaries(config_path: Path) -> AppConfig:
-    """Build a fallback ``AppConfig`` from ``config.toml`` or its raw ``[binaries]`` table.
+@dataclass(frozen=True, slots=True)
+class FallbackConfigState:
+    """Read-only snapshot describing the active offline fallback ``AppConfig``."""
+
+    config: AppConfig
+    from_file: bool
+    file_error: str | None
+
+
+def _config_run_defaults_key(cfg: AppConfig) -> tuple[object, ...]:
+    """Return a snapshot of the ``AppConfig`` fields that drive ``InputsScreen`` defaults."""
+    return (
+        cfg.audio.quality,
+        cfg.audio.copy_mp3,
+        cfg.output.output_dir,
+        cfg.output.flat,
+        cfg.output.on_conflict,
+        cfg.execution.jobs,
+    )
+
+
+def build_fallback_config(
+    config_path: Path | None,
+    *,
+    env: Mapping[str, str] | None = None,
+    load_config_fn: Callable[..., AppConfig] | None = None,
+) -> tuple[AppConfig, bool, str | None]:
+    """Build a fallback ``AppConfig`` preserving valid ``config.toml`` or raw ``[binaries]``.
+
+    Returns ``(config, from_file, file_error)``.
 
     When full ``load_config()`` fails during preflight (for example, because
     ``AFV_MB_CONTACT`` or ``AFV_MB_USER_AGENT`` is invalid, or because
@@ -131,11 +159,26 @@ def _fallback_config_with_raw_binaries(config_path: Path) -> AppConfig:
     ``tomllib``. Valid ``AFV_FFMPEG_PATH``, ``AFV_FFPROBE_PATH``, and
     ``AFV_OUTPUT_DIR`` environment overrides are applied cleanly on top.
     """
+    active_env = os.environ if env is None else env
+    loader = _config_mod.load_config if load_config_fn is None else load_config_fn
     cfg: AppConfig | None = None
-    try:
-        cfg = _config_mod.load_config(config_path=config_path, env={})
-    except (_config_mod.ConfigError, OSError, UnicodeDecodeError):
-        cfg = None
+    from_file = False
+    file_error: str | None = None
+    has_config_file = False
+
+    if config_path is not None:
+        try:
+            has_config_file = config_path.is_file()
+        except OSError as exc:
+            file_error = str(exc)
+
+    if file_error is None and config_path is not None and has_config_file:
+        try:
+            cfg = loader(config_path=config_path, env={})
+            from_file = True
+        except (_config_mod.ConfigError, OSError) as exc:
+            file_error = str(exc)
+            cfg = None
 
     if cfg is not None:
         # Never carry loaded file credentials across a failed preflight;
@@ -147,14 +190,18 @@ def _fallback_config_with_raw_binaries(config_path: Path) -> AppConfig:
         if cfg.binaries.ffprobe_path and "\x00" in cfg.binaries.ffprobe_path:
             cfg.binaries.ffprobe_path = None
     else:
-        cfg = _config_mod.AppConfig(config_path=config_path)
+        cfg = (
+            _config_mod.AppConfig(config_path=config_path)
+            if config_path is not None
+            else _config_mod.AppConfig()
+        )
         raw: object = None
-        try:
-            if config_path.is_file():
+        if config_path is not None and has_config_file:
+            try:
                 with config_path.open("rb") as fh:
                     raw = tomllib.load(fh)
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-            raw = None
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                raw = None
 
         if isinstance(raw, dict):
             binaries_tbl = raw.get("binaries")
@@ -166,16 +213,21 @@ def _fallback_config_with_raw_binaries(config_path: Path) -> AppConfig:
                     binaries_tbl, "ffprobe", "ffprobe_path"
                 )
 
-    env_ffmpeg = os.environ.get("AFV_FFMPEG_PATH", "").strip()
+    env_ffmpeg = active_env.get("AFV_FFMPEG_PATH", "").strip()
     if env_ffmpeg and "\x00" not in env_ffmpeg:
         cfg.binaries.ffmpeg_path = env_ffmpeg
-    env_ffprobe = os.environ.get("AFV_FFPROBE_PATH", "").strip()
+    env_ffprobe = active_env.get("AFV_FFPROBE_PATH", "").strip()
     if env_ffprobe and "\x00" not in env_ffprobe:
         cfg.binaries.ffprobe_path = env_ffprobe
-    env_output_dir = os.environ.get("AFV_OUTPUT_DIR", "").strip()
+    env_output_dir = active_env.get("AFV_OUTPUT_DIR", "").strip()
     if env_output_dir and "\x00" not in env_output_dir:
         cfg.output.output_dir = env_output_dir
-    return cfg
+    return cfg, from_file, file_error
+
+
+def _fallback_config_with_raw_binaries(config_path: Path) -> AppConfig:
+    """Return the fallback ``AppConfig`` built by :func:`build_fallback_config`."""
+    return build_fallback_config(config_path)[0]
 
 
 class ControllerState(StrEnum):
@@ -246,6 +298,8 @@ class RunController(QObject):
         self._cache_dir = cache_dir
         self._state = ControllerState.PREFLIGHT
         self._config: AppConfig | None = None
+        self._fallback_state: tuple[AppConfig, bool, str | None] | None = None
+        self._fallback_defaults_key: tuple[object, ...] | None = None
         self._plan_items: list[PlanItem] = []
         self._original_actions: list[PlanAction] = []
         self._output_root: Path | None = None
@@ -316,6 +370,21 @@ class RunController(QObject):
         return self._config
 
     @property
+    def effective_config(self) -> AppConfig:
+        """Return the active ``AppConfig`` used for planning (loaded or fallback)."""
+        if self._config is not None:
+            return self._config
+        return self._ensure_fallback_state()[0]
+
+    @property
+    def fallback_config_state(self) -> FallbackConfigState | None:
+        """Return the cached fallback snapshot when ``config`` is ``None``, else ``None``."""
+        if self._config is not None or self._fallback_state is None:
+            return None
+        cfg, from_file, file_error = self._fallback_state
+        return FallbackConfigState(config=cfg, from_file=from_file, file_error=file_error)
+
+    @property
     def plan_items(self) -> list[PlanItem]:
         """Return the planned items for the current batch."""
         return self._plan_items
@@ -332,10 +401,33 @@ class RunController(QObject):
 
     # -- Internal helpers ------------------------------------------------------
 
+    def _invalidate_fallback_state(self) -> None:
+        """Drop any cached fallback ``AppConfig`` snapshot so the next query reloads disk."""
+        self._fallback_state = None
+        self._fallback_defaults_key = None
+
+    def _ensure_fallback_state(self) -> tuple[AppConfig, bool, str | None]:
+        """Return the cached ``(config, from_file, file_error)`` fallback tuple."""
+        if self._fallback_state is None:
+            state = build_fallback_config(self._config_path())
+            self._fallback_state = state
+            self._fallback_defaults_key = _config_run_defaults_key(state[0])
+        return self._fallback_state
+
     def _set_state(self, new_state: ControllerState) -> None:
         if self._state == new_state:
             return
+        prev_state = self._state
         self._state = new_state
+        if new_state == ControllerState.PREFLIGHT:
+            self._invalidate_fallback_state()
+        elif (
+            new_state == ControllerState.INPUTS
+            and self._config is None
+            and prev_state in (ControllerState.PREFLIGHT, ControllerState.SETUP)
+        ):
+            self._invalidate_fallback_state()
+            self._ensure_fallback_state()
         self.state_changed.emit(new_state)
 
     def _emit_settings_saved(self, config: AppConfig | None) -> None:
@@ -609,6 +701,7 @@ class RunController(QObject):
         self._offline_default = _read_offline_setting()
         self._pending_binary_recheck = False
         self._config = None
+        self._invalidate_fallback_state()
         self._binaries_info = None
         self._preflight_error = None
         self._set_state(ControllerState.PREFLIGHT)
@@ -651,6 +744,7 @@ class RunController(QObject):
 
         prev_config = self._config
         self._config = reloaded
+        self._invalidate_fallback_state()
         _write_offline_setting(False)
         self._offline_default = False
         # Report via setup_error or state_changed only (never settings_saved) so
@@ -699,6 +793,7 @@ class RunController(QObject):
             return
 
         self._config = reloaded
+        self._invalidate_fallback_state()
         # Report via binaries_status, setup_error, or state_changed only (never
         # settings_saved) so a SETUP detour preserves per-run options on InputsScreen.
         if self._preflight_thread is not None:
@@ -730,21 +825,55 @@ class RunController(QObject):
             )
             return
 
-        cfg = self._config if self._config is not None else self._fallback_config()
         user_agent: str | None = None
         if not options.offline:
+            reloaded_from_fallback = False
+            prev_defaults_key = self._fallback_defaults_key
             try:
                 if self._config is None:
                     # Re-validate the full config file and AFV_* env overrides so
-                    # online mode stays blocked after a failed preflight (even if
-                    # config.toml is valid and another override masks the bad var).
-                    _config_mod.load_config(config_path=self._config_path())
+                    # online mode stays blocked after a failed preflight, and adopt
+                    # the reloaded config when the file or environment is fixed.
+                    cfg = _config_mod.load_config(config_path=self._config_path())
+                    self._config = cfg
+                    self._invalidate_fallback_state()
+                    reloaded_from_fallback = True
+                else:
+                    cfg = self._config
                 user_agent = _config_mod.resolve_mb_user_agent(cfg)
-            except (_config_mod.ConfigError, UnicodeDecodeError) as exc:
+            except _config_mod.ConfigError as exc:
                 msg = str(exc)
                 self.input_error.emit("missing_contact", msg)
                 self.setup_error.emit(msg)
                 self._set_state(ControllerState.SETUP)
+                return
+            if reloaded_from_fallback:
+                self._emit_settings_saved(cfg)
+                if prev_defaults_key is not None and _config_run_defaults_key(cfg) != (
+                    prev_defaults_key
+                ):
+                    self.input_error.emit(
+                        "config_changed",
+                        "config.toml changed outside the app; defaults on this screen "
+                        "were updated. Review your options and click Scan and plan again.",
+                    )
+                    return
+        elif self._config is not None:
+            cfg = self._config
+        else:
+            prev_defaults_key = self._fallback_defaults_key
+            fresh_state = build_fallback_config(self._config_path())
+            cfg = fresh_state[0]
+            new_defaults_key = _config_run_defaults_key(cfg)
+            self._fallback_state = fresh_state
+            self._fallback_defaults_key = new_defaults_key
+            if prev_defaults_key is not None and new_defaults_key != prev_defaults_key:
+                self._emit_settings_saved(None)
+                self.input_error.emit(
+                    "config_changed",
+                    "config.toml changed outside the app; defaults on this screen "
+                    "were updated. Review your options and click Scan and plan again.",
+                )
                 return
 
         if not self._binaries_ready():
@@ -962,6 +1091,11 @@ class RunController(QObject):
                 else:
                     self._config = reloaded
 
+            if reloaded is None:
+                self._invalidate_fallback_state()
+                self._ensure_fallback_state()
+            else:
+                self._invalidate_fallback_state()
             self._emit_settings_saved(reloaded)
             if self._shutting_down:
                 return
@@ -1005,6 +1139,7 @@ class RunController(QObject):
             return
 
         self._config = reloaded_cfg
+        self._invalidate_fallback_state()
         self._emit_settings_saved(reloaded_cfg)
         if self._shutting_down:
             return
@@ -1105,6 +1240,7 @@ class RunController(QObject):
     @Slot(object)
     def _on_preflight_config_loaded(self, cfg: object) -> None:
         self._config = cfg  # type: ignore[assignment]
+        self._invalidate_fallback_state()
 
     @Slot(object)
     def _on_preflight_binaries_checked(self, status: object) -> None:

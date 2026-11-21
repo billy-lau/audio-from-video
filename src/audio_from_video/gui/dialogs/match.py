@@ -44,7 +44,7 @@ from audio_from_video.gui.dialogs._common import (
     set_button_role,
 )
 from audio_from_video.gui.resources import load_icon
-from audio_from_video.gui.theme import refresh_themed_widgets, repolish
+from audio_from_video.gui.theme import is_theme_updating, refresh_themed_widgets, repolish
 from audio_from_video.models import Candidate, MatchDecision, ParsedHints
 from audio_from_video.planner import CandidateAction, CandidatePromptResponse
 from audio_from_video.presentation import (
@@ -75,8 +75,8 @@ _BUTTON_ICON_SIZE = QSize(14, 14)
 _TABLE_ICON_SIZE = QSize(14, 14)
 _INLINE_EDIT_MIN_HEIGHT = 30
 _TABLE_MIN_HEIGHT = 140
-_SCORE_HIGH_THRESHOLD = 0.80
-_SCORE_MEDIUM_THRESHOLD = 0.60
+_SCORE_HIGH_THRESHOLD = 0.85
+_SCORE_MEDIUM_THRESHOLD = 0.50
 
 _DIGIT_KEYS: dict[Qt.Key, int] = {
     Qt.Key.Key_1: 1,
@@ -1197,19 +1197,28 @@ class MatchDialog(QDialog):
         self._search_button.setIcon(load_icon("search"))
         self._tags_button.setIcon(load_icon("tag"))
 
-    def changeEvent(self, event: QEvent) -> None:
-        """Refresh button icon contrast and empty-state emphasis on theme changes."""
-        super().changeEvent(event)
-        if event.type() in (
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        ) and hasattr(self, "_search_button"):
-            refresh_themed_widgets(self)
+    def _refresh_themed_visuals(self) -> None:
+        """Refresh button icon contrast and empty-state emphasis on theme updates."""
+        if hasattr(self, "_search_button"):
             self._sync_button_icons()
             has_candidates = bool(self._candidates)
             _set_button_emphasized(self._search_button, not has_candidates)
             _set_button_emphasized(self._tags_button, not has_candidates)
+
+    def changeEvent(self, event: QEvent) -> None:
+        """Refresh button icon contrast and empty-state emphasis on theme changes."""
+        super().changeEvent(event)
+        if (
+            not is_theme_updating()
+            and event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+                QEvent.Type.StyleChange,
+            )
+            and hasattr(self, "_search_button")
+        ):
+            refresh_themed_widgets(self)
 
     def _update_detail_readout(self) -> None:
         """Update the compact readout strip beneath the candidate table."""
@@ -1378,16 +1387,33 @@ class MatchDialog(QDialog):
             self._table.selectRow(0)
             self._table.setCurrentCell(0, 0)
 
-    def _sync_default_button(self) -> None:
-        default_auto = (
+    def _is_auto_accept_default(self) -> bool:
+        """Return True when ``Use selected`` is the footer default action."""
+        return (
             self._payload.always_prompt
             and self._payload.match.decision == MatchDecision.AUTO_ACCEPT
             and bool(self._candidates)
         )
-        self._use_selected_button.setDefault(default_auto)
-        self._fallback_button.setDefault(not default_auto)
-        set_button_role(self._use_selected_button, "primary" if default_auto else "secondary")
-        set_button_role(self._fallback_button, "secondary" if default_auto else "primary")
+
+    def _sync_default_button(self) -> None:
+        default_auto = self._is_auto_accept_default()
+        if self._has_open_inline_form():
+            search_open = not self._search_panel.isHidden()
+            self._use_selected_button.setDefault(False)
+            self._fallback_button.setDefault(False)
+            self._search_submit_button.setDefault(
+                search_open and self._search_submit_button.isEnabled()
+            )
+            self._tags_submit_button.setDefault(
+                (not search_open) and self._tags_submit_button.isEnabled()
+            )
+        else:
+            self._search_submit_button.setDefault(False)
+            self._tags_submit_button.setDefault(False)
+            self._use_selected_button.setDefault(default_auto)
+            self._fallback_button.setDefault(not default_auto)
+            set_button_role(self._use_selected_button, "primary" if default_auto else "secondary")
+            set_button_role(self._fallback_button, "secondary" if default_auto else "primary")
         self.cancel_run_button.setAutoDefault(False)
         self.cancel_run_button.setDefault(False)
 
@@ -1402,6 +1428,16 @@ class MatchDialog(QDialog):
         """Return True when the inline search or custom-tags form is currently open."""
         return (not self._search_panel.isHidden()) or (not self._tags_panel.isHidden())
 
+    def _focus_open_inline_form(self) -> bool:
+        """Move keyboard focus to the open inline form's required field, if any."""
+        if not self._search_panel.isHidden():
+            self._search_title_edit.setFocus()
+            return True
+        if not self._tags_panel.isHidden():
+            self._tags_title_edit.setFocus()
+            return True
+        return False
+
     def _dismiss_open_inline_form(self) -> bool:
         """Hide any open inline form while preserving draft input text."""
         dismissed = False
@@ -1413,13 +1449,31 @@ class MatchDialog(QDialog):
             dismissed = True
         return dismissed
 
-    def _sync_footer_button_roles(self, *, inline_primary_active: bool) -> None:
-        """Keep at most one solid primary button visible when an inline form is emphasized."""
-        if inline_primary_active:
-            set_button_role(self._use_selected_button, "secondary")
-            set_button_role(self._fallback_button, "secondary")
+    def _sync_footer_button_roles(
+        self,
+        *,
+        search_is_primary: bool,
+        tags_is_primary: bool,
+    ) -> None:
+        """Keep visual primary roles and Qt ``default`` state aligned at all times."""
+        if self._has_open_inline_form():
+            self._use_selected_button.setDefault(False)
+            self._fallback_button.setDefault(False)
+            self._search_submit_button.setDefault(search_is_primary)
+            self._tags_submit_button.setDefault(tags_is_primary)
+            if search_is_primary or tags_is_primary:
+                set_button_role(self._use_selected_button, "secondary")
+                set_button_role(self._fallback_button, "secondary")
+                return
+            default_auto = self._is_auto_accept_default()
+            set_button_role(self._use_selected_button, "primary" if default_auto else "secondary")
+            set_button_role(self._fallback_button, "secondary" if default_auto else "primary")
             return
-        default_auto = self._use_selected_button.isDefault()
+        self._search_submit_button.setDefault(False)
+        self._tags_submit_button.setDefault(False)
+        default_auto = self._is_auto_accept_default()
+        self._use_selected_button.setDefault(default_auto)
+        self._fallback_button.setDefault(not default_auto)
         set_button_role(self._use_selected_button, "primary" if default_auto else "secondary")
         set_button_role(self._fallback_button, "secondary" if default_auto else "primary")
 
@@ -1464,7 +1518,8 @@ class MatchDialog(QDialog):
             "primary" if tags_is_primary else "secondary",
         )
         self._sync_footer_button_roles(
-            inline_primary_active=search_is_primary or tags_is_primary,
+            search_is_primary=search_is_primary,
+            tags_is_primary=tags_is_primary,
         )
         self._sync_button_icons()
 
@@ -1860,7 +1915,9 @@ class MatchDialog(QDialog):
                 and not self._answered
                 and not self._withdrawn
             ):
-                if (
+                if self._has_open_inline_form():
+                    self._focus_open_inline_form()
+                elif (
                     self._use_selected_button.isDefault()
                     and self._use_selected_button.isEnabled()
                     and self._candidates
@@ -1910,6 +1967,15 @@ class MatchDialog(QDialog):
         ):
             # Inline line edits handle Return directly; while busy, swallow Enter so
             # a second press or key auto-repeat never falls through or cancels the run.
+            event.accept()
+            return
+        if (
+            event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and not (event.modifiers() & _KEY_MODIFIER_MASK)
+            and not self._withdrawn
+            and self._has_open_inline_form()
+        ):
+            self._focus_open_inline_form()
             event.accept()
             return
         if self._try_handle_digit_key(event):

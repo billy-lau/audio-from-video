@@ -357,7 +357,7 @@ def load_config(
         try:
             with resolved_path.open("rb") as fh:
                 raw = tomllib.load(fh)
-        except (OSError, tomllib.TOMLDecodeError) as exc:
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             raise ConfigError(f"Failed to read config file {resolved_path}: {exc}") from exc
 
     binaries_tbl = raw.get("binaries")
@@ -480,7 +480,13 @@ def save_mb_contact(contact: str, config_path: Path | None = None) -> Path:
     target = config_path if config_path is not None else default_config_path()
     contact_line = f"contact = {json.dumps(validated)}"
 
-    existing_lines = target.read_text(encoding="utf-8").splitlines() if target.is_file() else []
+    if target.is_file():
+        try:
+            existing_lines = target.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ConfigError(f"Failed to read config file {target}: {exc}") from exc
+    else:
+        existing_lines = []
 
     out_lines: list[str] = []
     in_mb = False

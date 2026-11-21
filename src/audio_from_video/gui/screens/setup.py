@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
 from audio_from_video.binaries import format_install_instructions
 from audio_from_video.config import ConfigError, validate_mb_contact
 from audio_from_video.gui.controller import ControllerState
-from audio_from_video.gui.resources import load_icon
 from audio_from_video.gui.screens._common import (
     IconStatusBanner,
     SectionCard,
@@ -251,10 +250,7 @@ class SetupScreen(QWidget):
         self.save_contact_button = QPushButton("&Save contact", contact_card)
         self.save_contact_button.setObjectName("setup_save_contact_button")
         apply_primary_button_role(self.save_contact_button, icon_name="check_mark")
-        self._save_icon_active = self.save_contact_button.icon()
-        self._save_icon_disabled = load_icon("check_mark")
         self.save_contact_button.setEnabled(False)
-        self.save_contact_button.setIcon(self._save_icon_disabled)
         self.save_contact_button.setDefault(True)
         self.save_contact_button.setToolTip(
             "Save the validated MusicBrainz contact to config.toml and continue."
@@ -456,11 +452,8 @@ class SetupScreen(QWidget):
         self.error_banner.clear_message()
 
     def _set_save_enabled(self, enabled: bool) -> None:
-        """Enable or disable ``save_contact_button`` and swap to a crisp contrast icon."""
+        """Enable or disable ``save_contact_button``; Qt tints disabled icons automatically."""
         self.save_contact_button.setEnabled(enabled)
-        self.save_contact_button.setIcon(
-            self._save_icon_active if enabled else self._save_icon_disabled
-        )
 
     @Slot(str)
     def _on_contact_text_changed(self, text: str) -> None:

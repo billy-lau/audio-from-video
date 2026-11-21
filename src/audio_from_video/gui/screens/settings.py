@@ -58,6 +58,7 @@ from audio_from_video.gui.screens._common import (
     apply_primary_button_role,
     apply_secondary_button_role,
     configure_table_view,
+    find_invalid_env_overrides,
     format_byte_size,
     format_ttl_duration,
     join_oxford,
@@ -1131,36 +1132,25 @@ class SettingsScreen(QWidget):
         active_env: Mapping[str, str],
         *,
         probe_load_config: bool,
+        file_validated: bool = False,
     ) -> tuple[dict[str, tuple[str, str]], str | None]:
         """Validate active ``AFV_*`` overrides without attributing failures to ``config.toml``."""
-        issues: dict[str, tuple[str, str]] = {}
-        raw_contact = active_env.get("AFV_MB_CONTACT", "").strip()
-        if raw_contact:
-            try:
-                validate_mb_contact(raw_contact)
-            except ConfigError as exc:
-                issues["musicbrainz.contact"] = ("AFV_MB_CONTACT", str(exc))
-        raw_ua = active_env.get("AFV_MB_USER_AGENT", "").strip()
-        if raw_ua:
-            try:
-                validate_mb_user_agent(raw_ua)
-            except ConfigError as exc:
-                issues["musicbrainz.user_agent_override"] = ("AFV_MB_USER_AGENT", str(exc))
+        issues = find_invalid_env_overrides(active_env)
 
         extra_error: str | None = None
         if probe_load_config and not issues and self._raw_load_error_text is None:
             file_ok = True
-            if _path_exists(self._config_path):
+            if not file_validated and _path_exists(self._config_path):
                 try:
                     load_config(config_path=self._config_path, env={})
-                except (ConfigError, OSError, UnicodeDecodeError):
+                except (ConfigError, OSError):
                     file_ok = False
             if file_ok:
                 try:
                     load_config(config_path=self._config_path, env=active_env)
                 except ConfigError as exc:
                     extra_error = str(exc)
-                except (OSError, UnicodeDecodeError):
+                except OSError:
                     extra_error = None
         return issues, extra_error
 
@@ -1240,6 +1230,7 @@ class SettingsScreen(QWidget):
         active_env: Mapping[str, str],
         *,
         probe_load_config: bool,
+        file_validated: bool = False,
     ) -> None:
         """Update inline warning badges and ``status_banner`` for ``AFV_*`` overrides."""
         if self._config_load_blocked:
@@ -1247,6 +1238,7 @@ class SettingsScreen(QWidget):
         issues, extra_error = self._collect_invalid_env_overrides(
             active_env,
             probe_load_config=probe_load_config,
+            file_validated=file_validated,
         )
         self._env_override_issues = issues
         self._env_load_error_text = extra_error
@@ -1698,10 +1690,14 @@ class SettingsScreen(QWidget):
         # Inspect load_config validation for the exact ConfigError text and any unexpected issues.
         try:
             load_config(config_path=target_path, env={})
-        except (ConfigError, OSError, UnicodeDecodeError) as exc:
+        except (ConfigError, OSError) as exc:
             self._raw_load_error_text = str(exc)
 
-        self._refresh_env_validation_state(os.environ, probe_load_config=True)
+        self._refresh_env_validation_state(
+            os.environ,
+            probe_load_config=True,
+            file_validated=self._raw_load_error_text is None,
+        )
 
     def load_from_config(
         self,
@@ -1767,7 +1763,11 @@ class SettingsScreen(QWidget):
         if had_config_notice:
             self.status_banner.clear_message()
         self._apply_defaults_to_widgets(AppConfig(config_path=target_path))
-        self._refresh_env_validation_state(os.environ, probe_load_config=True)
+        self._refresh_env_validation_state(
+            os.environ,
+            probe_load_config=True,
+            file_validated=self._raw_load_error_text is None,
+        )
 
     def _current_ui_preferences(self) -> tuple[str, bool]:
         level = self.log_level_combo.currentText().strip().upper()

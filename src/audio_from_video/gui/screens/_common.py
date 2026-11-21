@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from platformdirs import user_log_dir
@@ -31,7 +31,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from audio_from_video.config import APP_NAME
+from audio_from_video.config import (
+    APP_NAME,
+    ConfigError,
+    validate_mb_contact,
+    validate_mb_user_agent,
+)
 from audio_from_video.gui.controller import (
     SETTINGS_APPLICATION,
     SETTINGS_ORGANIZATION,
@@ -41,6 +46,7 @@ from audio_from_video.gui.dialogs._common import MiddleElideLabel
 from audio_from_video.gui.resources import load_icon, render_svg_pixmap
 from audio_from_video.gui.theme import (
     is_dark_palette,
+    is_theme_updating,
     repolish,
     set_widget_role,
     themed_button_icon,
@@ -78,6 +84,24 @@ def join_oxford(items: Sequence[str]) -> str:
     if len(cleaned) == 2:
         return f"{cleaned[0]} and {cleaned[1]}"
     return f"{', '.join(cleaned[:-1])}, and {cleaned[-1]}"
+
+
+def find_invalid_env_overrides(active_env: Mapping[str, str]) -> dict[str, tuple[str, str]]:
+    """Return ``{attr_path: (env_var, error)}`` for invalid ``AFV_*`` overrides."""
+    issues: dict[str, tuple[str, str]] = {}
+    raw_contact = active_env.get("AFV_MB_CONTACT", "").strip()
+    if raw_contact:
+        try:
+            validate_mb_contact(raw_contact)
+        except ConfigError as exc:
+            issues["musicbrainz.contact"] = ("AFV_MB_CONTACT", str(exc))
+    raw_ua = active_env.get("AFV_MB_USER_AGENT", "").strip()
+    if raw_ua:
+        try:
+            validate_mb_user_agent(raw_ua)
+        except ConfigError as exc:
+            issues["musicbrainz.user_agent_override"] = ("AFV_MB_USER_AGENT", str(exc))
+    return issues
 
 
 def _scale_font(
@@ -359,9 +383,10 @@ def apply_danger_button_role(
     icon_name: str | None = None,
 ) -> None:
     """Style ``button`` as an outlined destructive action button."""
-    if icon_name is not None:
-        button.setIcon(load_icon(icon_name))
     set_widget_role(button, "afvRole", "danger")
+    if icon_name is not None:
+        button.setProperty("afvDangerIconName", icon_name)
+        button.setIcon(themed_button_icon(icon_name, on_primary=False, on_danger=True))
 
 
 def apply_ghost_button_role(
@@ -511,11 +536,15 @@ class ThemedSvgLabel(QLabel):
     def changeEvent(self, event: QEvent) -> None:
         """Refresh the SVG pixmap on DPR, palette, or style updates."""
         super().changeEvent(event)
-        if event.type() in (
-            QEvent.Type.DevicePixelRatioChange,
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
+        etype = event.type()
+        if etype == QEvent.Type.DevicePixelRatioChange or (
+            not is_theme_updating()
+            and etype
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+                QEvent.Type.StyleChange,
+            )
         ):
             self._refresh_pixmap(force=True)
 
@@ -857,11 +886,18 @@ class IconStatusBanner(QFrame):
     def changeEvent(self, event: QEvent) -> None:
         """Refresh the banner icon when the display scale, palette, or style changes."""
         super().changeEvent(event)
-        if self._rendered_icon_key is not None and event.type() in (
-            QEvent.Type.DevicePixelRatioChange,
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
+        etype = event.type()
+        if self._rendered_icon_key is not None and (
+            etype == QEvent.Type.DevicePixelRatioChange
+            or (
+                not is_theme_updating()
+                and etype
+                in (
+                    QEvent.Type.PaletteChange,
+                    QEvent.Type.ApplicationPaletteChange,
+                    QEvent.Type.StyleChange,
+                )
+            )
         ):
             self._update_pixmap(self._icon_name, force=True)
 
@@ -960,11 +996,18 @@ class StatusLine(QWidget):
     def changeEvent(self, event: QEvent) -> None:
         """Refresh the status icon when the display scale, palette, or style changes."""
         super().changeEvent(event)
-        if self._rendered_icon_key is not None and event.type() in (
-            QEvent.Type.DevicePixelRatioChange,
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
+        etype = event.type()
+        if self._rendered_icon_key is not None and (
+            etype == QEvent.Type.DevicePixelRatioChange
+            or (
+                not is_theme_updating()
+                and etype
+                in (
+                    QEvent.Type.PaletteChange,
+                    QEvent.Type.ApplicationPaletteChange,
+                    QEvent.Type.StyleChange,
+                )
+            )
         ):
             self._update_pixmap(self._icon_name, force=True)
 
@@ -997,6 +1040,7 @@ __all__ = [
     "apply_primary_button_role",
     "apply_secondary_button_role",
     "configure_table_view",
+    "find_invalid_env_overrides",
     "format_byte_size",
     "format_ttl_duration",
     "join_oxford",

@@ -22,7 +22,7 @@ from audio_from_video.gui.models.plan_table import (
 )
 from audio_from_video.gui.resources import render_svg_pixmap
 from audio_from_video.gui.theme import (
-    is_high_contrast_mode,
+    is_high_contrast_active,
     tokens_for_palette,
     tone_for_icon,
 )
@@ -105,8 +105,9 @@ def _paint_cell_background(
     *,
     is_alternate: bool,
     high_contrast: bool,
+    is_first_col: bool = False,
 ) -> None:
-    """Paint the cell backdrop, handling hover, selection, and crisp row dividers."""
+    """Paint the cell backdrop, selection bar, hover state, and crisp row dividers."""
     rect = option.rect
     selected = bool(option.state & QStyle.StateFlag.State_Selected)
     hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
@@ -119,6 +120,9 @@ def _paint_cell_background(
         else:
             bg = option.palette.color(QPalette.ColorRole.Base)
         painter.fillRect(rect, bg)
+        if selected and is_first_col and rect.width() >= 3:
+            bar_color = option.palette.color(QPalette.ColorRole.HighlightedText)
+            painter.fillRect(rect.left(), rect.top(), 3, rect.height(), bar_color)
         return
 
     tokens = tokens_for_palette(option.palette)
@@ -132,11 +136,45 @@ def _paint_cell_background(
         bg = QColor(tokens.bg_surface)
     painter.fillRect(rect, bg)
 
+    # Leading edge indicator for selected rows (non-color cue pairing with selection_bg).
+    if selected and is_first_col and rect.width() >= 3:
+        painter.fillRect(rect.left(), rect.top(), 3, rect.height(), QColor(tokens.focus_on_accent))
+
     # Subtle crisp horizontal bottom hairline joining adjacent cells uniformly.
     painter.save()
     painter.setPen(QPen(QColor(tokens.border_subtle), 1.0))
     y = rect.bottom()
     painter.drawLine(rect.left(), y, rect.right(), y)
+    painter.restore()
+
+
+def _paint_cell_focus_ring(
+    painter: QPainter,
+    option: QStyleOptionViewItem,
+    *,
+    high_contrast: bool,
+) -> None:
+    """Draw a high-contrast 2 px keyboard focus frame when the cell owns focus."""
+    if not (option.state & QStyle.StateFlag.State_HasFocus):
+        return
+    rect = option.rect
+    if rect.width() < 4 or rect.height() < 4:
+        return
+    selected = bool(option.state & QStyle.StateFlag.State_Selected)
+    if high_contrast:
+        ring_color = option.palette.color(
+            QPalette.ColorRole.HighlightedText if selected else QPalette.ColorRole.Highlight
+        )
+    else:
+        tokens = tokens_for_palette(option.palette)
+        ring_color = QColor(tokens.focus_on_accent if selected else tokens.focus_ring)
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    # Paint a razor-sharp 2 px focus border inset inside integer cell bounds.
+    painter.fillRect(rect.left(), rect.top(), rect.width(), 2, ring_color)
+    painter.fillRect(rect.left(), rect.bottom() - 1, rect.width(), 2, ring_color)
+    painter.fillRect(rect.left(), rect.top(), 2, rect.height(), ring_color)
+    painter.fillRect(rect.right() - 1, rect.top(), 2, rect.height(), ring_color)
     painter.restore()
 
 
@@ -178,11 +216,17 @@ class StatusPillDelegate(QStyledItemDelegate):
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
         is_alt = bool(opt.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
-        high_contrast = is_high_contrast_mode(palette=opt.palette)
+        high_contrast = is_high_contrast_active(palette=opt.palette)
 
         painter.save()
+        _paint_cell_background(
+            painter,
+            opt,
+            is_alternate=is_alt,
+            high_contrast=high_contrast,
+            is_first_col=index.column() == 0,
+        )
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        _paint_cell_background(painter, opt, is_alternate=is_alt, high_contrast=high_contrast)
 
         display_text = str(index.data(int(Qt.ItemDataRole.DisplayRole)) or "").strip()
         icon_name = _resolve_status_icon(index, display_text)
@@ -230,7 +274,7 @@ class StatusPillDelegate(QStyledItemDelegate):
         else:
             bg_color = QColor(tone.bg)
             fg_color = QColor(tone.fg)
-            border_color = QColor(tone.border)
+            border_color = QColor(tokens.selection_fg if selected else tone.border)
             border_width = 1.0
 
         path = QPainterPath()
@@ -283,6 +327,7 @@ class StatusPillDelegate(QStyledItemDelegate):
             icon_x = pill_rect.left() + (pill_rect.width() - _PILL_ICON_SIZE) / 2.0
             painter.drawPixmap(round(icon_x), round(icon_y), pixmap)
 
+        _paint_cell_focus_ring(painter, opt, high_contrast=high_contrast)
         painter.restore()
 
 
@@ -326,13 +371,20 @@ class PaddedTextDelegate(QStyledItemDelegate):
         self.initStyleOption(opt, index)
         is_alt = bool(opt.features & QStyleOptionViewItem.ViewItemFeature.Alternate)
         selected = bool(opt.state & QStyle.StateFlag.State_Selected)
-        high_contrast = is_high_contrast_mode(palette=opt.palette)
+        high_contrast = is_high_contrast_active(palette=opt.palette)
 
         painter.save()
-        _paint_cell_background(painter, opt, is_alternate=is_alt, high_contrast=high_contrast)
+        _paint_cell_background(
+            painter,
+            opt,
+            is_alternate=is_alt,
+            high_contrast=high_contrast,
+            is_first_col=index.column() == 0,
+        )
 
         text = str(index.data(int(Qt.ItemDataRole.DisplayRole)) or "")
         if not text:
+            _paint_cell_focus_ring(painter, opt, high_contrast=high_contrast)
             painter.restore()
             return
 
@@ -376,6 +428,7 @@ class PaddedTextDelegate(QStyledItemDelegate):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             elided,
         )
+        _paint_cell_focus_ring(painter, opt, high_contrast=high_contrast)
         painter.restore()
 
 

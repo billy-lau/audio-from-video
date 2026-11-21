@@ -42,8 +42,9 @@ extracted_audio/
 *.json.gz.tmp
 !tests/fixtures/eval_*.json.gz
 
-# OS and editor noise
+# OS, editor, and agent scratch noise
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+.agents/

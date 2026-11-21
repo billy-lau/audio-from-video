@@ -6,6 +6,7 @@ import itertools
 import os
 import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,11 +51,9 @@ from audio_from_video.config import (
     default_jobs,
     load_config,
     parse_quality,
-    validate_mb_contact,
-    validate_mb_user_agent,
 )
 from audio_from_video.discovery import DEFAULT_OUTPUT_FOLDER_NAME, VIDEO_EXTENSIONS
-from audio_from_video.gui.controller import ControllerState
+from audio_from_video.gui.controller import ControllerState, build_fallback_config
 from audio_from_video.gui.resources import load_icon
 from audio_from_video.gui.screens._common import (
     QUALITY_PRESETS,
@@ -66,6 +65,7 @@ from audio_from_video.gui.screens._common import (
     ThemedSvgLabel,
     apply_primary_button_role,
     apply_secondary_button_role,
+    find_invalid_env_overrides,
     join_oxford,
     make_divider,
     make_heading_label,
@@ -73,7 +73,11 @@ from audio_from_video.gui.screens._common import (
     open_ui_settings,
     set_accessible,
 )
-from audio_from_video.gui.theme import refresh_themed_widgets, set_widget_role
+from audio_from_video.gui.theme import (
+    is_theme_updating,
+    refresh_themed_widgets,
+    set_widget_role,
+)
 from audio_from_video.models import ConflictPolicy, ManualOverrides
 from audio_from_video.session import RunOptions
 
@@ -86,6 +90,9 @@ INVALID_CONFIG_BANNER_TEXT = "config.toml is invalid; using built-in defaults."
 INVALID_ENV_CONFIG_BANNER_TEXT = (
     "Configuration is invalid (AFV_* environment variable); using built-in defaults."
 )
+INVALID_ENV_WITH_FILE_BANNER_TEXT = (
+    "Configuration is invalid (AFV_* environment variable); using saved file settings."
+)
 INVALID_UNKNOWN_CONFIG_BANNER_TEXT = (
     "Configuration is invalid (config.toml or AFV_* environment); using built-in defaults."
 )
@@ -95,27 +102,105 @@ _UNSET = object()
 _DefaultsKey = tuple[str, bool, str | None, bool, ConflictPolicy, int]
 
 
+@dataclass(frozen=True, slots=True)
+class _FallbackConfigDiagnosis:
+    """Single-pass fallback ``AppConfig`` and warning banner when ``controller.config`` is None."""
+
+    effective_config: AppConfig
+    from_file: bool
+    banner_text: str | None
+
+
 def _open_shortcut_text() -> str:
     """Return a crisp, cross-platform label for the Open shortcut."""
     return "Cmd+O" if sys.platform == "darwin" else "Ctrl+O"
 
 
-def _find_invalid_env_overrides(active_env: Mapping[str, str]) -> list[tuple[str, str]]:
-    """Return ``(env_var, error)`` pairs for invalid ``AFV_*`` environment overrides."""
-    issues: list[tuple[str, str]] = []
-    raw_contact = active_env.get("AFV_MB_CONTACT", "").strip()
-    if raw_contact:
+def _classify_invalid_config_banner(
+    *,
+    target_path: Path | None,
+    from_file: bool,
+    file_error: str | None,
+    show_when_none: bool,
+    active_env: Mapping[str, str],
+    preflight_error: str = "",
+) -> str | None:
+    """Build an accurate warning banner for why ``controller.config`` is ``None``."""
+    env_issues = list(find_invalid_env_overrides(active_env).values())
+    env_load_error: str | None = None
+    if file_error is None and not env_issues and target_path is not None:
         try:
-            validate_mb_contact(raw_contact)
+            load_config(config_path=target_path, env=active_env)
         except ConfigError as exc:
-            issues.append(("AFV_MB_CONTACT", str(exc)))
-    raw_ua = active_env.get("AFV_MB_USER_AGENT", "").strip()
-    if raw_ua:
-        try:
-            validate_mb_user_agent(raw_ua)
-        except ConfigError as exc:
-            issues.append(("AFV_MB_USER_AGENT", str(exc)))
-    return issues
+            env_load_error = str(exc)
+        except OSError as exc:
+            file_error = str(exc)
+
+    env_prefix = INVALID_ENV_WITH_FILE_BANNER_TEXT if from_file else INVALID_ENV_CONFIG_BANNER_TEXT
+    if file_error is not None:
+        if env_issues:
+            sources = join_oxford(["config.toml", *(var for var, _detail in env_issues)])
+            return f"Configuration is invalid ({sources}); using built-in defaults."
+        return INVALID_CONFIG_BANNER_TEXT
+    if env_issues:
+        names = join_oxford([var for var, _detail in env_issues])
+        detail = env_issues[0][1].strip()
+        if detail and "config.toml" not in detail.casefold():
+            return f"{env_prefix} Check {names}: {detail}"
+        return f"{env_prefix} Check {names}."
+    if env_load_error is not None:
+        cleaned = env_load_error.strip()
+        if cleaned and "config.toml" not in cleaned.casefold():
+            return f"{env_prefix} {cleaned}"
+        return env_prefix
+    if not show_when_none:
+        return None
+    cleaned_preflight = preflight_error.strip()
+    if (
+        cleaned_preflight
+        and "AFV_" in cleaned_preflight
+        and "config.toml" not in cleaned_preflight.casefold()
+    ):
+        return f"{env_prefix} {cleaned_preflight}"
+    if from_file:
+        return "Configuration warning (AFV_* environment or settings); using saved file settings."
+    return INVALID_UNKNOWN_CONFIG_BANNER_TEXT
+
+
+def _diagnose_config_fallback(
+    *,
+    show_when_none: bool,
+    env: Mapping[str, str] | None = None,
+    preflight_error: str = "",
+) -> _FallbackConfigDiagnosis:
+    """Delegate fallback loading to :func:`build_fallback_config` and classify the banner."""
+    active_env = os.environ if env is None else env
+    path_error: str | None = None
+    try:
+        target_path: Path | None = default_config_path(active_env)
+    except OSError as exc:
+        target_path = None
+        path_error = str(exc)
+
+    effective, from_file, load_error = build_fallback_config(
+        target_path,
+        env=active_env,
+        load_config_fn=load_config,
+    )
+    file_error = path_error if path_error is not None else load_error
+    banner_text = _classify_invalid_config_banner(
+        target_path=target_path,
+        from_file=from_file and path_error is None,
+        file_error=file_error,
+        show_when_none=show_when_none,
+        active_env=active_env,
+        preflight_error=preflight_error,
+    )
+    return _FallbackConfigDiagnosis(
+        effective_config=effective,
+        from_file=from_file and path_error is None,
+        banner_text=banner_text,
+    )
 
 
 def _invalid_config_banner_text(
@@ -125,62 +210,11 @@ def _invalid_config_banner_text(
     preflight_error: str = "",
 ) -> str | None:
     """Classify why ``controller.config`` is ``None`` without falsely blaming ``config.toml``."""
-    active_env = os.environ if env is None else env
-    file_error: str | None = None
-    has_config_file = False
-    try:
-        target_path = default_config_path(active_env)
-        has_config_file = target_path.is_file()
-    except OSError as exc:
-        target_path = None
-        file_error = str(exc)
-
-    if file_error is None and target_path is not None and has_config_file:
-        try:
-            load_config(config_path=target_path, env={})
-        except (ConfigError, OSError, UnicodeDecodeError) as exc:
-            file_error = str(exc)
-
-    env_issues = _find_invalid_env_overrides(active_env)
-    env_load_error: str | None = None
-    if file_error is None and not env_issues and target_path is not None:
-        try:
-            load_config(config_path=target_path, env=active_env)
-        except ConfigError as exc:
-            env_load_error = str(exc)
-        except (OSError, UnicodeDecodeError) as exc:
-            file_error = str(exc)
-
-    if file_error is not None:
-        if env_issues:
-            sources = join_oxford(["config.toml", *(var for var, _detail in env_issues)])
-            return f"Configuration is invalid ({sources}); using built-in defaults."
-        return INVALID_CONFIG_BANNER_TEXT
-
-    if env_issues:
-        names = join_oxford([var for var, _detail in env_issues])
-        detail = env_issues[0][1].strip()
-        if detail and "config.toml" not in detail.casefold():
-            return f"{INVALID_ENV_CONFIG_BANNER_TEXT} Check {names}: {detail}"
-        return f"{INVALID_ENV_CONFIG_BANNER_TEXT} Check {names}."
-
-    if env_load_error is not None:
-        cleaned = env_load_error.strip()
-        if cleaned and "config.toml" not in cleaned.casefold():
-            return f"{INVALID_ENV_CONFIG_BANNER_TEXT} {cleaned}"
-        return INVALID_ENV_CONFIG_BANNER_TEXT
-
-    if not show_when_none:
-        return None
-
-    cleaned_preflight = preflight_error.strip()
-    if (
-        cleaned_preflight
-        and "AFV_" in cleaned_preflight
-        and "config.toml" not in cleaned_preflight.casefold()
-    ):
-        return f"{INVALID_ENV_CONFIG_BANNER_TEXT} {cleaned_preflight}"
-    return INVALID_UNKNOWN_CONFIG_BANNER_TEXT
+    return _diagnose_config_fallback(
+        show_when_none=show_when_none,
+        env=env,
+        preflight_error=preflight_error,
+    ).banner_text
 
 
 def _config_defaults_key(config: AppConfig) -> _DefaultsKey:
@@ -375,6 +409,7 @@ class InputsScreen(QWidget):
             ControllerState.SETUP,
         )
         self._had_valid_config: bool = False
+        self._effective_fallback_config: AppConfig | None = None
         self._loaded_defaults_key: _DefaultsKey | None = None
         self._last_offline_default: bool | None = None
         self._preflight_setup_error: str = ""
@@ -1129,11 +1164,8 @@ class InputsScreen(QWidget):
         self.scan_button = QPushButton("&Scan and plan", footer)
         self.scan_button.setObjectName("inputs_scan_button")
         apply_primary_button_role(self.scan_button, icon_name="play")
-        self._scan_icon_active = self.scan_button.icon()
-        self._scan_icon_disabled = load_icon("play")
         self.scan_button.setDefault(True)
         self.scan_button.setEnabled(False)
-        self.scan_button.setIcon(self._scan_icon_disabled)
         self.scan_button.setToolTip(
             "Scan the queued files and folders and build an extraction plan."
         )
@@ -1161,14 +1193,31 @@ class InputsScreen(QWidget):
         self._backspace_shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
         self._backspace_shortcut.activated.connect(self.remove_selected)
 
-        # Load initial defaults from controller.config and controller.offline_default.
-        self.load_defaults(
-            self._controller.config, offline_default=self._controller.offline_default
-        )
-        if not self._defaults_initialized:
+        # Load initial defaults from controller.config (or diagnosed fallback once when ready).
+        if self._controller.config is not None:
+            self.load_defaults(
+                self._controller.config,
+                offline_default=self._controller.offline_default,
+            )
+            self._apply_config_warning_message(None)
+        elif self._defaults_initialized:
+            diagnosis = self._resolve_fallback_diagnosis(show_when_none=False)
+            self._effective_fallback_config = diagnosis.effective_config
+            self._apply_config_defaults(
+                diagnosis.effective_config,
+                is_valid_config=False,
+                reset_all=True,
+            )
+            use_offline = bool(self._controller.offline_default)
+            self._set_lookup_mode_offline(use_offline)
+            self._last_offline_default = use_offline
+            self._apply_config_warning_message(diagnosis.banner_text)
+        else:
+            self.load_defaults(
+                None,
+                offline_default=self._controller.offline_default,
+            )
             self._last_offline_default = None
-        if self._defaults_initialized:
-            self._update_config_warning_banner(self._controller.config, show_when_none=False)
 
         # Wire UI controls and controller signals via bound methods only.
         self.add_files_button.clicked.connect(self._on_add_files)
@@ -1282,25 +1331,58 @@ class InputsScreen(QWidget):
             self.online_radio.setChecked(True)
         self._on_mode_toggled(self.online_radio.isChecked())
 
-    def _apply_config_defaults(self, config: AppConfig | None) -> None:
-        """Populate non-mode per-run option widgets from ``config`` without changing the mode."""
+    def _apply_config_defaults(
+        self,
+        config: AppConfig | None,
+        *,
+        is_valid_config: bool | None = None,
+        reset_all: bool = False,
+    ) -> None:
+        """Populate non-mode per-run option widgets from ``config`` without changing the mode.
+
+        When ``reset_all`` is ``False`` and a prior defaults snapshot exists, only
+        controls whose underlying default changed **and** whose current value still
+        equals the previous default are updated so explicit user edits always
+        survive both Settings saves and external ``config.toml`` reloads.
+        """
         cfg = config if config is not None else AppConfig()
+        new_key = _config_defaults_key(cfg)
+        prev_key = None if reset_all else self._loaded_defaults_key
+
         self._default_quality = cfg.audio.quality
-        self.quality_combo.setCurrentText(cfg.audio.quality)
-        self.flat_checkbox.setChecked(cfg.output.flat)
-        idx = self.conflict_combo.findData(cfg.output.on_conflict.value)
-        if idx >= 0:
-            self.conflict_combo.setCurrentIndex(idx)
+        if prev_key is None or (
+            new_key[0] != prev_key[0] and self.quality_combo.currentText().strip() == prev_key[0]
+        ):
+            self.quality_combo.setCurrentText(cfg.audio.quality)
+        if prev_key is None or (
+            new_key[3] != prev_key[3] and self.flat_checkbox.isChecked() == prev_key[3]
+        ):
+            self.flat_checkbox.setChecked(cfg.output.flat)
+        if prev_key is None or (
+            new_key[4] != prev_key[4]
+            and str(self.conflict_combo.currentData()) == prev_key[4].value
+        ):
+            idx = self.conflict_combo.findData(cfg.output.on_conflict.value)
+            if idx >= 0:
+                self.conflict_combo.setCurrentIndex(idx)
         target_jobs = max(1, cfg.execution.jobs if cfg.execution.jobs else default_jobs())
         if target_jobs > self.jobs_spin.maximum():
             self.jobs_spin.setMaximum(target_jobs)
-        self.jobs_spin.setValue(target_jobs)
-        self._had_valid_config = config is not None
-        self._loaded_defaults_key = _config_defaults_key(config) if config is not None else None
-        if config is not None:
+        if prev_key is None:
+            self.jobs_spin.setValue(target_jobs)
+        elif new_key[5] != prev_key[5]:
+            prev_jobs = max(1, prev_key[5] if prev_key[5] else default_jobs())
+            if self.jobs_spin.value() == prev_jobs:
+                self.jobs_spin.setValue(target_jobs)
+
+        valid_flag = (config is not None) if is_valid_config is None else is_valid_config
+        self._had_valid_config = valid_flag
+        if valid_flag:
+            self._effective_fallback_config = None
             self._preflight_setup_error = ""
             self.config_warning_banner.clear_message()
-        self._update_output_preview(config=config)
+        self._loaded_defaults_key = new_key if (config is not None or valid_flag) else None
+        self._update_output_preview(config=cfg)
         self._update_footer_summary()
 
     def load_defaults(
@@ -1313,12 +1395,46 @@ class InputsScreen(QWidget):
 
         This never modifies ``QSettings`` or ``config.toml``.
         """
-        self._apply_config_defaults(config)
+        self._apply_config_defaults(config, reset_all=True)
         use_offline = bool(
             self._controller.offline_default if offline_default is None else offline_default
         )
         self._set_lookup_mode_offline(use_offline)
         self._last_offline_default = use_offline
+
+    def _apply_config_warning_message(self, message: str | None) -> None:
+        """Display or hide ``config_warning_banner`` for ``message``."""
+        if message is not None:
+            self.config_warning_banner.set_message(
+                "status_warn",
+                message,
+                role_label="Configuration warning",
+            )
+        else:
+            self.config_warning_banner.clear_message()
+
+    def _resolve_fallback_diagnosis(self, *, show_when_none: bool) -> _FallbackConfigDiagnosis:
+        """Read fallback defaults via ``controller.fallback_config_state`` and classify banner."""
+        state = self._controller.fallback_config_state
+        if state is not None:
+            effective = state.config
+            banner_text = _classify_invalid_config_banner(
+                target_path=effective.config_path,
+                from_file=state.from_file,
+                file_error=state.file_error,
+                show_when_none=show_when_none,
+                active_env=os.environ,
+                preflight_error=self._preflight_setup_error,
+            )
+            return _FallbackConfigDiagnosis(
+                effective_config=effective,
+                from_file=state.from_file,
+                banner_text=banner_text,
+            )
+        return _diagnose_config_fallback(
+            show_when_none=show_when_none,
+            preflight_error=self._preflight_setup_error,
+        )
 
     def _update_config_warning_banner(
         self,
@@ -1328,21 +1444,13 @@ class InputsScreen(QWidget):
     ) -> None:
         """Show a warning banner when entering ``INPUTS`` with an invalid configuration."""
         if config is not None:
+            self._effective_fallback_config = None
             self._preflight_setup_error = ""
             self.config_warning_banner.clear_message()
             return
-        message = _invalid_config_banner_text(
-            show_when_none=show_when_none,
-            preflight_error=self._preflight_setup_error,
-        )
-        if message is not None:
-            self.config_warning_banner.set_message(
-                "status_warn",
-                message,
-                role_label="Configuration warning",
-            )
-        else:
-            self.config_warning_banner.clear_message()
+        diagnosis = self._resolve_fallback_diagnosis(show_when_none=show_when_none)
+        self._effective_fallback_config = diagnosis.effective_config
+        self._apply_config_warning_message(diagnosis.banner_text)
 
     def add_paths(self, paths: Iterable[Path]) -> None:
         """Add local file or folder paths to the queue, avoiding duplicates."""
@@ -1512,7 +1620,14 @@ class InputsScreen(QWidget):
             self.output_dir_edit.setFocus()
 
     def _update_output_preview(self, *, config: object = _UNSET) -> None:
-        active_config = self._controller.config if config is _UNSET else config
+        if config is _UNSET:
+            active_config = (
+                self._controller.config
+                if self._controller.config is not None
+                else self._effective_fallback_config
+            )
+        else:
+            active_config = config
         explicit = self.output_dir_edit.text().strip()
         self.output_reset_button.setEnabled(bool(explicit))
         preview, multi_root = _compute_default_output_preview(
@@ -1542,7 +1657,6 @@ class InputsScreen(QWidget):
         self.remove_button.setEnabled(has_selection)
         self.clear_button.setEnabled(has_items)
         self.scan_button.setEnabled(has_items)
-        self.scan_button.setIcon(self._scan_icon_active if has_items else self._scan_icon_disabled)
         self.inputs_list.updateGeometry()
         self.drop_hint_label.setText(
             f"Drop video files or folders here, or use Add files ({shortcut_label}) or Add folder."
@@ -1716,6 +1830,13 @@ class InputsScreen(QWidget):
             self._set_output_highlighted(False)
 
         self._clear_mode_notice()
+        if clean_kind == "config_changed":
+            self.error_banner.set_message(
+                "status_info",
+                text,
+                role_label="Configuration updated",
+            )
+            return
         self.error_banner.set_message("status_error", text, role_label="Input error")
 
     @Slot(str)
@@ -1734,18 +1855,38 @@ class InputsScreen(QWidget):
                 or new_key != self._loaded_defaults_key
             )
             if should_reload:
-                self._apply_config_defaults(config)
+                self._apply_config_defaults(
+                    config,
+                    is_valid_config=True,
+                    reset_all=not self._defaults_initialized,
+                )
             else:
+                self._effective_fallback_config = None
                 self._preflight_setup_error = ""
                 self._update_output_preview(config=config)
             self._defaults_initialized = True
-        elif not self._defaults_initialized:
-            self._apply_config_defaults(None)
-            self._defaults_initialized = True
+            self._apply_config_warning_message(None)
         else:
-            self._had_valid_config = False
-            self._loaded_defaults_key = None
-            self._update_output_preview(config=None)
+            diagnosis = self._resolve_fallback_diagnosis(show_when_none=True)
+            self._effective_fallback_config = diagnosis.effective_config
+            new_key = _config_defaults_key(diagnosis.effective_config)
+            if not self._defaults_initialized:
+                self._apply_config_defaults(
+                    diagnosis.effective_config,
+                    is_valid_config=False,
+                    reset_all=True,
+                )
+                self._defaults_initialized = True
+            elif new_key != self._loaded_defaults_key:
+                self._apply_config_defaults(
+                    diagnosis.effective_config,
+                    is_valid_config=False,
+                    reset_all=False,
+                )
+            else:
+                self._had_valid_config = False
+                self._update_output_preview(config=diagnosis.effective_config)
+            self._apply_config_warning_message(diagnosis.banner_text)
 
         offline_default = bool(self._controller.offline_default)
         if (
@@ -1757,7 +1898,6 @@ class InputsScreen(QWidget):
             self._last_offline_default = offline_default
 
         self._clear_mode_notice()
-        self._update_config_warning_banner(config, show_when_none=True)
 
     @Slot(object)
     def _on_state_changed(self, state: object) -> None:
@@ -1785,10 +1925,22 @@ class InputsScreen(QWidget):
                     or new_key != self._loaded_defaults_key
                 )
                 if should_reload:
-                    self.load_defaults(
+                    self._apply_config_defaults(
                         config,
-                        offline_default=self._controller.offline_default,
+                        is_valid_config=True,
+                        reset_all=not was_initialized,
                     )
+                    offline_default = bool(self._controller.offline_default)
+                    if (
+                        not was_initialized
+                        or (prev == ControllerState.SETUP and offline_default)
+                        or (
+                            self._last_offline_default is None
+                            or offline_default != self._last_offline_default
+                        )
+                    ):
+                        self._set_lookup_mode_offline(offline_default)
+                    self._last_offline_default = offline_default
                     self._defaults_initialized = True
                     switched_to_offline = (
                         prev == ControllerState.SETUP
@@ -1803,23 +1955,36 @@ class InputsScreen(QWidget):
                         switched_to_offline = was_initialized and was_online
                     self._last_offline_default = bool(self._controller.offline_default)
                     self._update_output_preview()
-                self._update_config_warning_banner(config)
+                self._apply_config_warning_message(None)
             else:
-                if not self._defaults_initialized:
-                    self.load_defaults(
-                        None,
-                        offline_default=self._controller.offline_default,
+                diagnosis = self._resolve_fallback_diagnosis(show_when_none=True)
+                self._effective_fallback_config = diagnosis.effective_config
+                new_key = _config_defaults_key(diagnosis.effective_config)
+                if not was_initialized:
+                    self._apply_config_defaults(
+                        diagnosis.effective_config,
+                        is_valid_config=False,
+                        reset_all=True,
                     )
+                    use_offline = bool(self._controller.offline_default)
+                    self._set_lookup_mode_offline(use_offline)
+                    self._last_offline_default = use_offline
                     self._defaults_initialized = True
                 else:
-                    self._had_valid_config = False
-                    self._loaded_defaults_key = None
+                    if new_key != self._loaded_defaults_key:
+                        self._apply_config_defaults(
+                            diagnosis.effective_config,
+                            is_valid_config=False,
+                            reset_all=False,
+                        )
+                    else:
+                        self._had_valid_config = False
+                        self._update_output_preview(config=diagnosis.effective_config)
                     if prev == ControllerState.SETUP and self._controller.offline_default:
                         self._set_lookup_mode_offline(True)
                         switched_to_offline = was_initialized and was_online
                     self._last_offline_default = bool(self._controller.offline_default)
-                    self._update_output_preview()
-                self._update_config_warning_banner(None, show_when_none=True)
+                self._apply_config_warning_message(diagnosis.banner_text)
             if switched_to_offline:
                 self.mode_notice_banner.set_message(
                     "status_info",
@@ -1834,7 +1999,7 @@ class InputsScreen(QWidget):
     def changeEvent(self, event: QEvent) -> None:
         """Refresh themed SVG icons on live palette or style changes."""
         super().changeEvent(event)
-        if event.type() in (
+        if not is_theme_updating() and event.type() in (
             QEvent.Type.PaletteChange,
             QEvent.Type.ApplicationPaletteChange,
             QEvent.Type.StyleChange,

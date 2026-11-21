@@ -18,6 +18,8 @@ from typing import Literal
 from PySide6.QtCore import QEvent, QObject, Qt, Slot
 from PySide6.QtGui import QColor, QGuiApplication, QIcon, QPalette
 from PySide6.QtWidgets import QApplication, QPushButton, QStyleFactory, QWidget
+from shiboken6 import getCppPointer as _cpp_pointer
+from shiboken6 import isValid as _qt_is_valid
 
 from audio_from_video.gui.resources import clear_icon_caches, icon_path, load_icon
 
@@ -38,6 +40,12 @@ ICON_TONE_MAP: dict[str, str] = {
 }
 
 _THEME_CONTROLLER_ATTR = "_afv_theme_controller"
+_HIGH_CONTRAST_APP_PROPERTY = "_afvHighContrastActive"
+_THEME_UPDATING_APP_PROPERTY = "_afvThemeUpdating"
+_FUSION_STYLE_ACTIVE_PROPERTY = "_afvFusionStyleActive"
+_FUSION_STYLE_REF_ATTR = "_afv_fusion_style_ref"
+_THEME_SHEET_HEADER_PREFIX = "/* Audio from Video — "
+_CONTRAST_PREFERENCE_SLOT_TYPE = getattr(Qt, "ContrastPreference", object)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +91,7 @@ class ThemeTokens:
     selection_bg: str
     selection_fg: str
     focus_ring: str
+    focus_on_accent: str
 
     # Destructive actions
     danger_primary: str
@@ -143,9 +152,10 @@ LIGHT_TOKENS = ThemeTokens(
     accent_pressed="#123C8E",
     accent_fg="#FFFFFF",
     accent_link="#164BB0",
-    selection_bg="#DCE8FC",
-    selection_fg="#0F172A",
+    selection_bg="#1D5FD6",
+    selection_fg="#FFFFFF",
     focus_ring="#1D5FD6",
+    focus_on_accent="#000000",
     danger_primary="#B91C1C",
     danger_fg="#991B1B",
     danger_bg_hover="#FEE2E2",
@@ -215,9 +225,10 @@ DARK_TOKENS = ThemeTokens(
     accent_pressed="#1E40AF",
     accent_fg="#FFFFFF",
     accent_link="#7CB3FF",
-    selection_bg="#1E3A5F",
-    selection_fg="#F1F5F9",
+    selection_bg="#2969EC",
+    selection_fg="#FFFFFF",
     focus_ring="#60A5FA",
+    focus_on_accent="#FFFFFF",
     danger_primary="#DC2626",
     danger_fg="#FCA5A5",
     danger_bg_hover="#3A181C",
@@ -370,6 +381,56 @@ def is_high_contrast_mode(
     return False
 
 
+def is_high_contrast_active(
+    app: QGuiApplication | None = None,
+    palette: QPalette | None = None,
+) -> bool:
+    """Return True when high-contrast styling is active (explicit flag or OS/palette)."""
+    target_app = app
+    if target_app is None:
+        inst = QGuiApplication.instance()
+        target_app = inst if isinstance(inst, QGuiApplication) else None
+    if target_app is not None and bool(target_app.property(_HIGH_CONTRAST_APP_PROPERTY)):
+        return True
+    return is_high_contrast_mode(app=target_app, palette=palette)
+
+
+def is_theme_updating(app: QGuiApplication | None = None) -> bool:
+    """Return True while ``apply_theme`` or ``ThemeController`` is performing a batch update."""
+    target_app = app
+    if target_app is None:
+        inst = QGuiApplication.instance()
+        target_app = inst if isinstance(inst, QGuiApplication) else None
+    return target_app is not None and bool(target_app.property(_THEME_UPDATING_APP_PROPERTY))
+
+
+def _palette_matches_tokens(palette: QPalette, tokens: ThemeTokens) -> bool:
+    """Return True when ``palette`` holds the exact active Studio Slate colors for ``tokens``."""
+    checks = (
+        (QPalette.ColorRole.Window, tokens.bg_window),
+        (QPalette.ColorRole.WindowText, tokens.text_primary),
+        (QPalette.ColorRole.Base, tokens.bg_surface),
+        (QPalette.ColorRole.Button, tokens.bg_surface),
+        (QPalette.ColorRole.Highlight, tokens.selection_bg),
+        (QPalette.ColorRole.HighlightedText, tokens.selection_fg),
+    )
+    for role, expected_hex in checks:
+        color = palette.color(QPalette.ColorGroup.Active, role)
+        if (
+            not color.isValid()
+            or color.name(QColor.NameFormat.HexRgb).upper() != expected_hex.upper()
+        ):
+            return False
+    return True
+
+
+def _is_slate_palette(palette: QPalette) -> bool:
+    """Return True when ``palette`` matches an installed light or dark Studio Slate palette."""
+    return _palette_matches_tokens(palette, LIGHT_TOKENS) or _palette_matches_tokens(
+        palette, DARK_TOKENS
+    )
+
+
 def detect_theme_mode(app_or_widget: QGuiApplication | QWidget | None = None) -> ThemeMode:
     """Return ``'light'``, ``'dark'``, or ``'high_contrast'`` for the active context."""
     app: QGuiApplication | None = None
@@ -388,7 +449,7 @@ def detect_theme_mode(app_or_widget: QGuiApplication | QWidget | None = None) ->
             app = inst
             palette = inst.palette()
 
-    if is_high_contrast_mode(app=app, palette=palette):
+    if is_high_contrast_active(app=app, palette=palette):
         return "high_contrast"
 
     if app is not None:
@@ -529,50 +590,28 @@ def _asset_url(stem: str) -> str:
 
 
 def _build_banner_qss(tokens: ThemeTokens) -> str:
-    """Generate per-tone QSS rules for ``[afvBanner='true']`` and ``[afvSurface='kpi-tile']``."""
+    """Generate per-tone color rules for banners, KPI tiles, and status chips."""
     rules: list[str] = []
     for tone_name in ("ok", "info", "working", "warn", "error", "unmatched", "neutral"):
         tone = tokens.tone(tone_name)
         rules.append(
-            f"""
-QFrame[afvBanner="true"][afvTone="{tone_name}"] {{
-    background-color: {tone.bg};
-    border: 1px solid {tone.border};
-    border-radius: 8px;
-}}
-QFrame[afvBanner="true"][afvTone="{tone_name}"] QFrame[afvBannerStripe="true"] {{
-    background-color: {tone.stripe};
-    border: none;
-    border-radius: 2px;
-    min-width: 3px;
-    max-width: 3px;
-}}
-QFrame[afvBanner="true"][afvTone="{tone_name}"] QLabel {{
-    color: {tone.fg};
-    background-color: transparent;
-    border: none;
-}}
+            f"""QFrame[afvBanner="true"][afvTone="{tone_name}"],
 QFrame[afvSurface="kpi-tile"][afvTone="{tone_name}"] {{
     background-color: {tone.bg};
     border: 1px solid {tone.border};
-    border-radius: 8px;
 }}
-QFrame[afvSurface="kpi-tile"][afvTone="{tone_name}"] QLabel[afvText="kpi-value"] {{
-    color: {tone.fg};
+QFrame[afvBanner="true"][afvTone="{tone_name}"] QFrame[afvBannerStripe="true"] {{
+    background-color: {tone.stripe};
 }}
+QFrame[afvBanner="true"][afvTone="{tone_name}"] QLabel,
 QFrame[afvSurface="kpi-tile"][afvTone="{tone_name}"] QLabel {{
     color: {tone.fg};
-    background-color: transparent;
 }}
 QLabel[afvSurface="chip"][afvTone="{tone_name}"] {{
     background-color: {tone.bg};
     color: {tone.fg};
     border: 1px solid {tone.border};
-    border-radius: 10px;
-    padding: 2px 8px;
-    font-weight: 600;
-}}
-"""
+}}"""
         )
     return "\n".join(rules)
 
@@ -595,12 +634,36 @@ def _high_contrast_uses_dark_glyph(palette: QPalette | None = None) -> bool:
     return False
 
 
+def _high_contrast_disabled_uses_dark_glyph(palette: QPalette | None = None) -> bool:
+    """Return True when dark indicator glyphs contrast better against ``WindowText``."""
+    target_pal = palette
+    if target_pal is None:
+        inst = QGuiApplication.instance()
+        if isinstance(inst, QGuiApplication):
+            target_pal = inst.palette()
+    if target_pal is None:
+        return False
+    win_text = target_pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.WindowText)
+    if win_text.isValid():
+        return win_text.lightness() >= 128
+    win_bg = target_pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window)
+    if win_bg.isValid():
+        return win_bg.lightness() < 128
+    return False
+
+
 def _build_high_contrast_stylesheet(palette: QPalette | None = None) -> str:
     """Build a native-palette-preserving QSS stylesheet for high-contrast modes."""
     use_dark_glyph = _high_contrast_uses_dark_glyph(palette)
     check_url = _asset_url("ui_check_dark" if use_dark_glyph else "ui_check_white")
     indet_url = _asset_url("ui_indeterminate_dark" if use_dark_glyph else "ui_indeterminate_white")
     radio_url = _asset_url("ui_radio_dot_dark" if use_dark_glyph else "ui_radio_dot_white")
+    dis_dark_glyph = _high_contrast_disabled_uses_dark_glyph(palette)
+    dis_check_url = _asset_url("ui_check_dark" if dis_dark_glyph else "ui_check_white")
+    dis_indet_url = _asset_url(
+        "ui_indeterminate_dark" if dis_dark_glyph else "ui_indeterminate_white"
+    )
+    dis_radio_url = _asset_url("ui_radio_dot_dark" if dis_dark_glyph else "ui_radio_dot_white")
     return f"""
 /* Audio from Video — High-Contrast Accessibility Stylesheet */
 QScrollArea {{
@@ -613,9 +676,16 @@ QScrollArea > QWidget > QWidget {{
 QFrame[afvSurface="card"],
 QFrame[afvSurface="card-inset"],
 QFrame[afvSurface="context-box"],
-QFrame[afvSurface="kpi-tile"] {{
+QFrame[afvSurface="kpi-tile"],
+QFrame[afvSurface="segmented"] {{
     border: 2px solid palette(window-text);
     border-radius: 6px;
+}}
+QLabel[afvSurface="chip"] {{
+    border: 1px solid palette(window-text);
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-weight: 600;
 }}
 QFrame[afvSurface="header-bar"] {{
     border: none;
@@ -663,6 +733,10 @@ QPushButton[afvRole="primary"] {{
     color: palette(highlighted-text);
     font-weight: 600;
 }}
+QPushButton[afvRole="danger"] {{
+    border: 2px solid palette(window-text);
+    font-weight: 600;
+}}
 QPushButton:focus,
 QToolButton:focus,
 QLineEdit:focus,
@@ -678,6 +752,17 @@ QPushButton[afvRole="filter-pill"]:checked {{
     background-color: palette(highlight);
     color: palette(highlighted-text);
     font-weight: 600;
+}}
+QPushButton[afvRole="primary"]:focus,
+QPushButton[afvRole="filter-pill"]:checked:focus {{
+    border: 2px dashed palette(highlighted-text);
+}}
+QPushButton:disabled,
+QPushButton[afvRole="primary"]:disabled,
+QPushButton[afvRole="danger"]:disabled {{
+    background-color: palette(window);
+    color: palette(button-text);
+    border: 2px dashed palette(button-text);
 }}
 QLabel[afvStepState="active"] {{
     background-color: palette(highlight);
@@ -730,7 +815,22 @@ QCheckBox::indicator:indeterminate {{
 }}
 QCheckBox::indicator:disabled {{
     background-color: palette(window);
-    border: 2px solid palette(mid);
+    border: 2px dashed palette(window-text);
+    image: none;
+}}
+QCheckBox::indicator:checked:disabled {{
+    background-color: palette(window-text);
+    border: 2px solid palette(window-text);
+    image: {dis_check_url};
+}}
+QCheckBox::indicator:indeterminate:disabled {{
+    background-color: palette(window-text);
+    border: 2px solid palette(window-text);
+    image: {dis_indet_url};
+}}
+QCheckBox::indicator:checked:focus,
+QCheckBox::indicator:indeterminate:focus {{
+    border: 2px dashed palette(highlighted-text);
 }}
 QRadioButton::indicator {{
     width: 15px;
@@ -750,7 +850,37 @@ QRadioButton::indicator:checked {{
 }}
 QRadioButton::indicator:disabled {{
     background-color: palette(window);
-    border: 2px solid palette(mid);
+    border: 2px dashed palette(window-text);
+    image: none;
+}}
+QRadioButton::indicator:checked:disabled {{
+    background-color: palette(window-text);
+    border: 2px solid palette(window-text);
+    image: {dis_radio_url};
+}}
+QRadioButton::indicator:checked:focus {{
+    border: 2px dashed palette(highlighted-text);
+}}
+QTableView::item,
+QTableWidget::item,
+QListWidget::item {{
+    border: 2px solid transparent;
+}}
+QTableView::item:selected,
+QTableWidget::item:selected,
+QListWidget::item:selected {{
+    background-color: palette(highlight);
+    color: palette(highlighted-text);
+}}
+QTableView::item:focus,
+QTableWidget::item:focus,
+QListWidget::item:focus {{
+    border: 2px solid palette(highlight);
+}}
+QTableView::item:selected:focus,
+QTableWidget::item:selected:focus,
+QListWidget::item:selected:focus {{
+    border: 2px dashed palette(highlighted-text);
 }}
 QAbstractScrollArea::corner,
 QTableCornerButton::section {{
@@ -786,6 +916,11 @@ def build_stylesheet(
     check_url = _asset_url("ui_check_white")
     indet_url = _asset_url("ui_indeterminate_white")
     radio_url = _asset_url("ui_radio_dot_white")
+    dis_check_url = _asset_url("ui_check_dark" if tokens.is_dark else "ui_check_white")
+    dis_indet_url = _asset_url(
+        "ui_indeterminate_dark" if tokens.is_dark else "ui_indeterminate_white"
+    )
+    dis_radio_url = _asset_url("ui_radio_dot_dark" if tokens.is_dark else "ui_radio_dot_white")
     chev_down_url = _asset_url(
         "ui_chevron_down_dark" if tokens.is_dark else "ui_chevron_down_light"
     )
@@ -842,10 +977,6 @@ QLabel[afvText="hero"] {{
     color: {t.text_primary};
     font-weight: 700;
 }}
-QLabel[afvText="kpi-value"] {{
-    color: {t.text_primary};
-    font-weight: 700;
-}}
 QLabel[afvText="error-inline"] {{
     color: {t.error.fg};
     font-weight: 600;
@@ -889,7 +1020,7 @@ QFrame[afvSurface="drop-zone"] {{
     border-radius: 10px;
 }}
 QFrame[afvSurface="drop-zone"][afvDragActive="true"] {{
-    background-color: {t.selection_bg};
+    background-color: {t.info.bg};
     border: 2px solid {t.accent_primary};
     border-radius: 10px;
 }}
@@ -928,6 +1059,17 @@ QFrame[afvBanner="true"] QLabel {{
     background-color: transparent;
     border: none;
 }}
+QFrame[afvSurface="kpi-tile"] QLabel {{
+    background-color: transparent;
+}}
+QLabel[afvSurface="chip"] {{
+    background-color: {t.neutral.bg};
+    color: {t.neutral.fg};
+    border: 1px solid {t.neutral.border};
+    border-radius: 10px;
+    padding: 2px 8px;
+    font-weight: 600;
+}}
 {banner_qss}
 
 /* ---- Workflow Header Step Pills ---------------------------------------- */
@@ -951,11 +1093,6 @@ QLabel[afvStepState="pending"] {{
     border: 1px solid transparent;
     border-radius: 6px;
     padding: 3px 8px;
-}}
-QLabel[afvStepSep="true"] {{
-    color: {t.border_control};
-    background-color: transparent;
-    padding: 0px 1px;
 }}
 
 /* ---- MainWindow Error Panel -------------------------------------------- */
@@ -1047,7 +1184,7 @@ QPushButton[afvRole="primary"]:pressed {{
     border: 1px solid {t.accent_pressed};
 }}
 QPushButton[afvRole="primary"]:focus {{
-    border: 2px solid {t.focus_ring};
+    border: 2px solid {t.focus_on_accent};
     padding: 4px 13px;
 }}
 QPushButton[afvRole="primary"]:disabled {{
@@ -1105,21 +1242,6 @@ QPushButton[afvRole="danger"]:disabled {{
     border: 1px solid {t.border_subtle};
 }}
 
-QPushButton[afvRole="link"] {{
-    background-color: transparent;
-    color: {t.accent_link};
-    border: 1px solid transparent;
-    padding: 4px 8px;
-}}
-QPushButton[afvRole="link"]:hover {{
-    background-color: {t.bg_surface_hover};
-    border-radius: 6px;
-}}
-QPushButton[afvRole="link"]:focus {{
-    border: 2px solid {t.focus_ring};
-    padding: 3px 7px;
-}}
-
 QPushButton[afvRole="filter-pill"] {{
     background-color: transparent;
     color: {t.text_secondary};
@@ -1144,6 +1266,10 @@ QPushButton[afvRole="filter-pill"]:checked:hover {{
 }}
 QPushButton[afvRole="filter-pill"]:focus {{
     border: 2px solid {t.focus_ring};
+    padding: 3px 9px;
+}}
+QPushButton[afvRole="filter-pill"]:checked:focus {{
+    border: 2px solid {t.focus_on_accent};
     padding: 3px 9px;
 }}
 
@@ -1216,9 +1342,8 @@ QTextEdit:focus {{
     border: 2px solid {t.focus_ring};
     padding: 5px 7px;
 }}
-QPlainTextEdit[readOnly="true"],
 QPlainTextEdit[afvReadonly="true"],
-QTextEdit[readOnly="true"] {{
+QTextEdit[afvReadonly="true"] {{
     background-color: {t.bg_surface_alt};
     color: {t.text_primary};
     border: 1px solid {t.border_subtle};
@@ -1359,40 +1484,42 @@ QRadioButton:disabled {{
 QCheckBox::indicator {{
     width: 15px;
     height: 15px;
-    border: 1.5px solid {t.border_control};
+    border: 1px solid {t.border_control};
     border-radius: 4px;
     background-color: {t.bg_surface};
 }}
 QCheckBox::indicator:hover {{
-    border: 1.5px solid {t.accent_primary};
+    border: 1px solid {t.accent_primary};
     background-color: {t.bg_surface_hover};
 }}
 QCheckBox::indicator:checked {{
     background-color: {t.accent_primary};
-    border: 1.5px solid {t.accent_primary};
+    border: 1px solid {t.accent_primary};
     image: {check_url};
 }}
 QCheckBox::indicator:checked:hover {{
     background-color: {t.accent_hover};
-    border: 1.5px solid {t.accent_hover};
+    border: 1px solid {t.accent_hover};
 }}
 QCheckBox::indicator:indeterminate {{
     background-color: {t.accent_primary};
-    border: 1.5px solid {t.accent_primary};
+    border: 1px solid {t.accent_primary};
     image: {indet_url};
 }}
 QCheckBox::indicator:disabled {{
     background-color: {t.bg_disabled};
-    border: 1.5px solid {t.border_subtle};
+    border: 1px solid {t.border_subtle};
+    image: none;
 }}
 QCheckBox::indicator:checked:disabled {{
-    background-color: {t.border_control};
-    border: 1.5px solid {t.border_control};
-    image: {check_url};
+    background-color: {t.text_disabled};
+    border: 1px solid {t.text_disabled};
+    image: {dis_check_url};
 }}
-QCheckBox::indicator:focus,
-QRadioButton::indicator:focus {{
-    border: 2px solid {t.focus_ring};
+QCheckBox::indicator:indeterminate:disabled {{
+    background-color: {t.text_disabled};
+    border: 1px solid {t.text_disabled};
+    image: {dis_indet_url};
 }}
 QCheckBox:focus,
 QRadioButton:focus {{
@@ -1402,26 +1529,41 @@ QRadioButton:focus {{
 QRadioButton::indicator {{
     width: 15px;
     height: 15px;
-    border: 1.5px solid {t.border_control};
+    border: 1px solid {t.border_control};
     border-radius: 8px;
     background-color: {t.bg_surface};
 }}
 QRadioButton::indicator:hover {{
-    border: 1.5px solid {t.accent_primary};
+    border: 1px solid {t.accent_primary};
     background-color: {t.bg_surface_hover};
 }}
 QRadioButton::indicator:checked {{
     background-color: {t.accent_primary};
-    border: 1.5px solid {t.accent_primary};
+    border: 1px solid {t.accent_primary};
     image: {radio_url};
 }}
 QRadioButton::indicator:checked:hover {{
     background-color: {t.accent_hover};
-    border: 1.5px solid {t.accent_hover};
+    border: 1px solid {t.accent_hover};
 }}
 QRadioButton::indicator:disabled {{
     background-color: {t.bg_disabled};
-    border: 1.5px solid {t.border_subtle};
+    border: 1px solid {t.border_subtle};
+    image: none;
+}}
+QRadioButton::indicator:checked:disabled {{
+    background-color: {t.text_disabled};
+    border: 1px solid {t.text_disabled};
+    image: {dis_radio_url};
+}}
+QCheckBox::indicator:focus,
+QRadioButton::indicator:focus {{
+    border: 2px solid {t.focus_ring};
+}}
+QCheckBox::indicator:checked:focus,
+QCheckBox::indicator:indeterminate:focus,
+QRadioButton::indicator:checked:focus {{
+    border: 2px solid {t.focus_on_accent};
 }}
 
 /* ---- Tables & Lists ---------------------------------------------------- */
@@ -1443,8 +1585,8 @@ QTableWidget:focus {{
 }}
 QTableView::item,
 QTableWidget::item {{
-    padding: 4px 8px;
-    border: none;
+    padding: 2px 6px 3px 6px;
+    border: 2px solid transparent;
     border-bottom: 1px solid {t.border_subtle};
 }}
 QTableView::item:hover,
@@ -1455,6 +1597,21 @@ QTableView::item:selected,
 QTableWidget::item:selected {{
     background-color: {t.selection_bg};
     color: {t.selection_fg};
+}}
+QTableView::item:selected:hover,
+QTableWidget::item:selected:hover {{
+    background-color: {t.accent_hover};
+    color: {t.selection_fg};
+}}
+QTableView::item:focus,
+QTableWidget::item:focus {{
+    padding: 2px 6px;
+    border: 2px solid {t.focus_ring};
+}}
+QTableView::item:selected:focus,
+QTableWidget::item:selected:focus {{
+    padding: 2px 6px;
+    border: 2px solid {t.focus_on_accent};
 }}
 
 QHeaderView {{
@@ -1483,7 +1640,11 @@ QAbstractScrollArea::corner {{
     border: none;
 }}
 QTableWidget[afvDensity="compact"]::item {{
-    padding: 3px 5px;
+    padding: 1px 3px 2px 3px;
+}}
+QTableWidget[afvDensity="compact"]::item:focus,
+QTableWidget[afvDensity="compact"]::item:selected:focus {{
+    padding: 1px 3px;
 }}
 QTableWidget[afvDensity="compact"] QHeaderView::section {{
     padding: 5px 5px;
@@ -1502,7 +1663,8 @@ QListWidget:focus {{
     border: 2px solid {t.focus_ring};
 }}
 QListWidget::item {{
-    padding: 5px 8px;
+    padding: 3px 6px;
+    border: 2px solid transparent;
     border-radius: 4px;
 }}
 QListWidget::item:hover {{
@@ -1511,6 +1673,16 @@ QListWidget::item:hover {{
 QListWidget::item:selected {{
     background-color: {t.selection_bg};
     color: {t.selection_fg};
+}}
+QListWidget::item:selected:hover {{
+    background-color: {t.accent_hover};
+    color: {t.selection_fg};
+}}
+QListWidget::item:focus {{
+    border: 2px solid {t.focus_ring};
+}}
+QListWidget::item:selected:focus {{
+    border: 2px solid {t.focus_on_accent};
 }}
 
 /* ---- Progress Bars ----------------------------------------------------- */
@@ -1660,53 +1832,161 @@ def set_widget_role(
     repolish(widget, include_children=include_children)
 
 
+def _current_style_name(app: QApplication) -> str | None:
+    """Return the underlying Qt style name, unwrapping ``QStyleSheetStyle`` if active."""
+    current = app.style()
+    if current is None:
+        return None
+    base_fn = getattr(current, "baseStyle", None)
+    if callable(base_fn):
+        base_style = base_fn()
+        if base_style is not None:
+            name = base_style.name() or base_style.objectName()
+            if name:
+                return str(name)
+    name = current.name() or current.objectName()
+    return str(name) if name else None
+
+
+def _restore_style_by_name(app: QApplication, style_name: str | None) -> None:
+    """Restore a previously active Qt style name when it is registered in ``QStyleFactory``."""
+    if not style_name:
+        return
+    current = _current_style_name(app)
+    if current is not None and current.casefold() == style_name.casefold():
+        return
+    style_names = QStyleFactory.keys()
+    match = next(
+        (key for key in style_names if key.casefold() == style_name.casefold()),
+        None,
+    )
+    if match is not None:
+        app.setStyle(match)
+
+
+def _clear_fusion_style_ref(app: QApplication) -> None:
+    """Drop the recorded live ``QStyle`` handle tracked on ``app``."""
+    with contextlib.suppress(AttributeError):
+        delattr(app, _FUSION_STYLE_REF_ATTR)
+
+
+def _record_fusion_style_ref(app: QApplication) -> None:
+    """Record the current live ``QStyle`` C++ object/address after applying Fusion/QSS."""
+    style = app.style()
+    if style is None or not _qt_is_valid(style):
+        _clear_fusion_style_ref(app)
+        return
+    try:
+        ptr = int(_cpp_pointer(style)[0])
+    except (RuntimeError, TypeError, IndexError):
+        _clear_fusion_style_ref(app)
+        return
+    setattr(app, _FUSION_STYLE_REF_ATTR, (style, ptr))
+
+
+def _matches_recorded_fusion_style(app: QApplication, current: object) -> bool:
+    """Return True when ``current`` is still the exact live ``QStyle`` wrapper we recorded."""
+    recorded = getattr(app, _FUSION_STYLE_REF_ATTR, None)
+    if recorded is None:
+        return False
+    saved_style, saved_ptr = recorded
+    if not _qt_is_valid(saved_style) or not _qt_is_valid(current):
+        return False
+    try:
+        return int(_cpp_pointer(current)[0]) == saved_ptr
+    except (RuntimeError, TypeError, IndexError):
+        return False
+
+
 def _apply_fusion_style(app: QApplication) -> None:
-    """Switch ``app`` to ``Fusion`` when available for macOS/Windows/Linux parity."""
+    """Switch ``app`` to ``Fusion`` when available for macOS/Windows/Linux parity.
+
+    When a stylesheet is already active, Qt wraps the underlying style in an
+    internal nameless ``QStyleSheetStyle`` whose ``name()`` is empty and whose
+    ``baseStyle`` is unavailable in PySide6. Comparing the live wrapped
+    ``QStyle`` C++ instance against the one recorded after our previous
+    ``apply_theme`` avoids redundant ``app.setStyle("Fusion")`` calls while
+    still restoring ``Fusion`` if external code replaces the style via
+    ``app.setStyle(...)``.
+    """
     current = app.style()
     if current is not None:
-        name = current.objectName().casefold()
-        if name == "fusion":
+        raw_name = (current.name() or current.objectName()).casefold()
+        if raw_name == "fusion":
+            app.setProperty(_FUSION_STYLE_ACTIVE_PROPERTY, True)
+            _record_fusion_style_ref(app)
             return
-        # When a stylesheet is active, Qt wraps the underlying style in QStyleSheetStyle.
         base_fn = getattr(current, "baseStyle", None)
         if callable(base_fn):
             base_style = base_fn()
-            if base_style is not None and base_style.objectName().casefold() == "fusion":
-                return
+            if base_style is not None:
+                base_name = (base_style.name() or base_style.objectName()).casefold()
+                if base_name == "fusion":
+                    app.setProperty(_FUSION_STYLE_ACTIVE_PROPERTY, True)
+                    _record_fusion_style_ref(app)
+                    return
+        if (
+            not raw_name
+            and bool(app.property(_FUSION_STYLE_ACTIVE_PROPERTY))
+            and app.styleSheet().lstrip().startswith(_THEME_SHEET_HEADER_PREFIX)
+            and _matches_recorded_fusion_style(app, current)
+        ):
+            return
+    _clear_fusion_style_ref(app)
     style_names = QStyleFactory.keys()
     if any(key.casefold() == "fusion" for key in style_names):
         app.setStyle("Fusion")
+        app.setProperty(_FUSION_STYLE_ACTIVE_PROPERTY, True)
+        _record_fusion_style_ref(app)
 
 
 def themed_button_icon(
     icon_name: str,
     *,
     on_primary: bool = True,
+    on_danger: bool = False,
     palette: QPalette | None = None,
 ) -> QIcon:
-    """Return a scalable button icon with accessible ink contrast for ``on_primary``.
+    """Return a scalable button icon with accessible ink contrast for button roles.
 
     For primary CTA buttons (``afvRole="primary"``):
-    - In OS high-contrast mode, resolves tint dynamically from
+    - In OS high-contrast mode (or when ``apply_theme(..., high_contrast=True)``
+      is active), resolves tint dynamically from
       ``QPalette.ColorRole.HighlightedText`` so icons stay legible over
-      ``palette(highlight)`` (for example, black on yellow or white on navy).
+      ``palette(highlight)`` (for example, black on yellow, white on navy, or
+      black on cyan).
     - When the Studio Slate stylesheet is active, uses bright white ink matching
       ``accent_fg`` over the solid cobalt button fill.
-    - Otherwise (or when ``on_primary`` is ``False``), returns a dynamic icon
-      tinted from ``QPalette.ColorRole.ButtonText``.
+    - When ``on_danger`` is ``True`` (and ``on_primary`` is ``False``), uses
+      ``danger_fg`` under the active Studio Slate stylesheet so the icon
+      matches the danger label text, falling back to ``ButtonText`` in
+      high-contrast mode.
+    - Otherwise, returns a dynamic icon tinted from
+      ``QPalette.ColorRole.ButtonText``.
     """
+    app = QGuiApplication.instance()
+    target_app = app if isinstance(app, QGuiApplication) else None
+    high_contrast_active = is_high_contrast_active(app=target_app, palette=palette)
+
     if on_primary:
-        app = QGuiApplication.instance()
-        target_app = app if isinstance(app, QGuiApplication) else None
-        if is_high_contrast_mode(app=target_app, palette=palette):
+        if high_contrast_active:
             return load_icon(icon_name, color_role=QPalette.ColorRole.HighlightedText)
         if isinstance(app, QApplication) and app.styleSheet():
             return load_icon(icon_name, color=LIGHT_TOKENS.accent_fg)
+    elif (
+        on_danger
+        and not high_contrast_active
+        and isinstance(app, QApplication)
+        and app.styleSheet()
+    ):
+        effective_palette = palette if palette is not None else app.palette()
+        tokens = tokens_for_palette(effective_palette)
+        return load_icon(icon_name, color=tokens.danger_fg)
     return load_icon(icon_name)
 
 
 def refresh_themed_widgets(root: QWidget) -> None:
-    """Re-rasterize live SVG pixmaps and primary button icons under ``root``.
+    """Re-rasterize live SVG pixmaps and themed button icons under ``root``.
 
     Used when ``QApplication.setPalette(...)`` updates behind an active QSS
     stylesheet that would otherwise stop ``PaletteChange`` events from reaching
@@ -1724,6 +2004,17 @@ def refresh_themed_widgets(root: QWidget) -> None:
             if isinstance(icon_name, str) and icon_name:
                 is_primary = widget.property("afvRole") == "primary"
                 widget.setIcon(themed_button_icon(icon_name, on_primary=is_primary))
+                continue
+            danger_icon_name = widget.property("afvDangerIconName")
+            if isinstance(danger_icon_name, str) and danger_icon_name:
+                is_danger = widget.property("afvRole") == "danger"
+                widget.setIcon(
+                    themed_button_icon(
+                        danger_icon_name,
+                        on_primary=False,
+                        on_danger=is_danger,
+                    )
+                )
 
 
 def refresh_all_themed_widgets(app: QApplication) -> None:
@@ -1750,14 +2041,49 @@ def apply_theme(
         is_high_contrast_mode(app=app) if high_contrast is None else bool(high_contrast)
     )
     tokens = tokens_for_scheme(scheme, app=app)
-    _apply_fusion_style(app)
-    if use_high_contrast:
-        app.setStyleSheet(build_stylesheet(tokens, high_contrast=True, palette=app.palette()))
-    else:
-        app.setPalette(build_palette(tokens))
-        app.setStyleSheet(build_stylesheet(tokens, high_contrast=False))
+    was_updating = bool(app.property(_THEME_UPDATING_APP_PROPERTY))
+    app.setProperty(_THEME_UPDATING_APP_PROPERTY, True)
+    try:
+        app.setProperty(_HIGH_CONTRAST_APP_PROPERTY, use_high_contrast)
+        prev_sheet = app.styleSheet()
+        if use_high_contrast:
+            # High-contrast rules reference ``palette(...)`` brushes that Qt caches inside
+            # QStyleSheetStyle, so detach and re-apply even when the sheet text matches.
+            # Detaching the previous wrapper first also avoids Qt's slow stylesheet-to-
+            # stylesheet repolish pass and unwraps the real underlying QStyle.
+            if prev_sheet:
+                app.setStyleSheet("")
+            _apply_fusion_style(app)
+            # Drop any previously installed Studio Slate palette so Qt resumes exposing
+            # the native OS palette (while keeping explicit caller-set palettes intact).
+            if _is_slate_palette(app.palette()):
+                app.setPalette(QPalette())
+            app.setStyleSheet(build_stylesheet(tokens, high_contrast=True, palette=app.palette()))
+        else:
+            new_sheet = build_stylesheet(tokens, high_contrast=False)
+            target_palette = build_palette(tokens)
+            need_sheet = prev_sheet != new_sheet
+            if need_sheet and prev_sheet:
+                # Detaching an active QStyleSheetStyle before installing the replacement
+                # avoids Qt's slow stylesheet-to-stylesheet repolish walk across the widget
+                # tree and unwraps the underlying QStyle for _apply_fusion_style().
+                app.setStyleSheet("")
+            _apply_fusion_style(app)
+            if app.palette() != target_palette:
+                app.setPalette(target_palette)
+            if need_sheet:
+                app.setStyleSheet(new_sheet)
+        if bool(app.property(_FUSION_STYLE_ACTIVE_PROPERTY)):
+            _record_fusion_style_ref(app)
+    finally:
+        app.setProperty(_THEME_UPDATING_APP_PROPERTY, was_updating)
     clear_icon_caches()
-    refresh_all_themed_widgets(app)
+    if not was_updating:
+        app.setProperty(_THEME_UPDATING_APP_PROPERTY, True)
+        try:
+            refresh_all_themed_widgets(app)
+        finally:
+            app.setProperty(_THEME_UPDATING_APP_PROPERTY, False)
     return tokens
 
 
@@ -1767,12 +2093,18 @@ def apply_theme_for_capture(app: QApplication, theme_name: str = "light") -> Non
 
 
 class ThemeController(QObject):
-    """Lifecycle-managed theme listener reacting to OS light/dark changes.
+    """Lifecycle-managed theme listener reacting to OS appearance and contrast changes.
 
-    Connects ``QStyleHints.colorSchemeChanged`` strictly to a bound ``@Slot``
-    method (no lambdas or ``functools.partial``) and snapshots the prior
-    application palette, stylesheet, and window icon so ``uninstall()`` leaves
-    a shared ``QApplication`` instance completely clean for embedded test runs.
+    Connects ``QStyleHints.colorSchemeChanged`` and (when available)
+    ``QAccessibilityHints.contrastPreferenceChanged`` strictly to bound
+    ``@Slot`` methods (no lambdas or ``functools.partial``), keeping both
+    wrappers referenced to guard against temporary ``shiboken6`` lifetime bugs.
+    Snapshots the prior application palette, stylesheet, ``QStyleFactory`` style
+    name, and window icon so ``uninstall()`` leaves a shared ``QApplication``
+    instance completely clean for embedded test runs. Note: custom or
+    ``QProxyStyle`` subclass instances without a registered ``QStyleFactory``
+    name are deleted by Qt when ``QApplication.setStyle()`` replaces them and
+    cannot be re-attached on ``uninstall()``.
     """
 
     def __init__(
@@ -1791,11 +2123,21 @@ class ThemeController(QObject):
         self._previous_palette = QPalette(app.palette())
         self._previous_stylesheet = app.styleSheet()
         self._previous_icon = QIcon(app.windowIcon())
+        self._previous_style_name = _current_style_name(app)
         self._hints = None
+        self._accessibility_hints = None
         self._updating_theme = True
+        app.setProperty(_THEME_UPDATING_APP_PROPERTY, True)
         try:
+            if self._previous_style_name is None and self._previous_stylesheet:
+                # Clearing the prior stylesheet once right before applying ours unwraps
+                # Qt's nameless QStyleSheetStyle so the underlying style name is visible.
+                app.setStyleSheet("")
+                self._previous_style_name = _current_style_name(app)
+            app.setProperty(_THEME_UPDATING_APP_PROPERTY, False)
             self._active_tokens: ThemeTokens = apply_theme(app, scheme=scheme)
         finally:
+            app.setProperty(_THEME_UPDATING_APP_PROPERTY, False)
             self._updating_theme = False
 
         try:
@@ -1812,20 +2154,45 @@ class ThemeController(QObject):
                     hints.colorSchemeChanged.connect(self._on_color_scheme_changed)
             except (AttributeError, RuntimeError):
                 self._hints = None
+            if self._hints is not None:
+                try:
+                    accessibility = self._hints.accessibility()
+                    if accessibility is not None:
+                        self._accessibility_hints = accessibility
+                        accessibility.contrastPreferenceChanged.connect(
+                            self._on_contrast_preference_changed
+                        )
+                except (AttributeError, RuntimeError):
+                    self._accessibility_hints = None
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        """Refresh live SVG pixmaps and primary icons when ``app.setPalette`` changes."""
+        """Refresh icons and re-evaluate high-contrast mode on external palette updates."""
         if (
-            not self._uninstalled
-            and not self._updating_theme
-            and watched is self._app
-            and event.type() == QEvent.Type.ApplicationPaletteChange
+            watched is not self._app
+            or event.type() != QEvent.Type.ApplicationPaletteChange
+            or self._uninstalled
+            or self._updating_theme
+            or is_theme_updating(self._app)
         ):
-            self._updating_theme = True
-            try:
-                refresh_all_themed_widgets(self._app)
-            finally:
-                self._updating_theme = False
+            return super().eventFilter(watched, event)
+        self._updating_theme = True
+        try:
+            if self._follow_system:
+                was_hc = bool(self._app.property(_HIGH_CONTRAST_APP_PROPERTY))
+                now_hc = is_high_contrast_mode(app=self._app)
+                if was_hc or now_hc:
+                    # Also re-apply on high-contrast -> high-contrast palette switches
+                    # (e.g., HC Black to HC White) so Qt refreshes cached ``palette(...)``
+                    # brushes and checkbox/radio glyph polarity inside QStyleSheetStyle.
+                    self._active_tokens = apply_theme(
+                        self._app,
+                        scheme=None,
+                        high_contrast=now_hc,
+                    )
+                    return super().eventFilter(watched, event)
+            refresh_all_themed_widgets(self._app)
+        finally:
+            self._updating_theme = False
         return super().eventFilter(watched, event)
 
     @property
@@ -1841,6 +2208,28 @@ class ThemeController(QObject):
         self._updating_theme = True
         try:
             self._active_tokens = apply_theme(self._app, scheme=color_scheme)
+        finally:
+            self._updating_theme = False
+
+    @Slot(_CONTRAST_PREFERENCE_SLOT_TYPE)
+    def _on_contrast_preference_changed(self, preference: object) -> None:
+        """Re-apply the active stylesheet live when OS contrast preference changes."""
+        if self._uninstalled:
+            return
+        high_contrast_enum = getattr(Qt, "ContrastPreference", None)
+        if high_contrast_enum is not None and isinstance(preference, high_contrast_enum):
+            use_high_contrast = preference == high_contrast_enum.HighContrast
+        elif high_contrast_enum is not None and preference == high_contrast_enum.HighContrast:
+            use_high_contrast = True
+        else:
+            use_high_contrast = is_high_contrast_mode(app=self._app)
+        self._updating_theme = True
+        try:
+            self._active_tokens = apply_theme(
+                self._app,
+                scheme=None,
+                high_contrast=use_high_contrast,
+            )
         finally:
             self._updating_theme = False
 
@@ -1862,18 +2251,38 @@ class ThemeController(QObject):
             with contextlib.suppress(RuntimeError):
                 self._app.removeEventFilter(self)
             self._event_filter_installed = False
+        if self._accessibility_hints is not None:
+            with contextlib.suppress(RuntimeError, TypeError):
+                self._accessibility_hints.contrastPreferenceChanged.disconnect(
+                    self._on_contrast_preference_changed
+                )
+            self._accessibility_hints = None
         if self._hints is not None:
             with contextlib.suppress(RuntimeError, TypeError):
                 self._hints.colorSchemeChanged.disconnect(self._on_color_scheme_changed)
             self._hints = None
         with contextlib.suppress(RuntimeError):
-            self._app.setStyleSheet(self._previous_stylesheet)
-            self._app.setPalette(self._previous_palette)
-            self._app.setWindowIcon(self._previous_icon)
+            self._app.setProperty(_THEME_UPDATING_APP_PROPERTY, True)
+            try:
+                self._app.setProperty(_HIGH_CONTRAST_APP_PROPERTY, None)
+                self._app.setProperty(_FUSION_STYLE_ACTIVE_PROPERTY, None)
+                _clear_fusion_style_ref(self._app)
+                # Clear the active stylesheet first so Qt unwraps QStyleSheetStyle before
+                # restoring the underlying QStyle, then re-apply any prior stylesheet.
+                self._app.setStyleSheet("")
+                _restore_style_by_name(self._app, self._previous_style_name)
+                if self._previous_stylesheet:
+                    self._app.setStyleSheet(self._previous_stylesheet)
+                self._app.setPalette(self._previous_palette)
+                self._app.setWindowIcon(self._previous_icon)
+            finally:
+                self._app.setProperty(_THEME_UPDATING_APP_PROPERTY, None)
         clear_icon_caches()
         if getattr(self._app, _THEME_CONTROLLER_ATTR, None) is self:
             with contextlib.suppress(AttributeError):
                 delattr(self._app, _THEME_CONTROLLER_ATTR)
+        with contextlib.suppress(RuntimeError):
+            self.deleteLater()
 
 
 def install_theme(
@@ -1910,7 +2319,9 @@ __all__ = [
     "detect_theme_mode",
     "install_theme",
     "is_dark_palette",
+    "is_high_contrast_active",
     "is_high_contrast_mode",
+    "is_theme_updating",
     "refresh_all_themed_widgets",
     "refresh_themed_widgets",
     "relative_luminance",

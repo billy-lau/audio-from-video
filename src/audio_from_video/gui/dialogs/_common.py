@@ -36,7 +36,12 @@ from PySide6.QtWidgets import (
 )
 
 from audio_from_video.gui.resources import render_svg_pixmap
-from audio_from_video.gui.theme import is_dark_palette, repolish, themed_button_icon
+from audio_from_video.gui.theme import (
+    is_dark_palette,
+    is_theme_updating,
+    repolish,
+    themed_button_icon,
+)
 
 EM_DASH = "—"
 
@@ -142,11 +147,15 @@ class ReactiveSvgLabel(QLabel):
     def changeEvent(self, event: QEvent) -> None:
         """Re-render the vector pixmap when display scale, palette, or style changes."""
         super().changeEvent(event)
-        if event.type() in (
-            QEvent.Type.DevicePixelRatioChange,
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
+        etype = event.type()
+        if etype == QEvent.Type.DevicePixelRatioChange or (
+            not is_theme_updating()
+            and etype
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+                QEvent.Type.StyleChange,
+            )
         ):
             self._refresh_pixmap(force=True)
 

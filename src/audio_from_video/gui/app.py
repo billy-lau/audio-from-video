@@ -79,6 +79,7 @@ from audio_from_video.gui.screens._common import (
 from audio_from_video.gui.theme import (
     ThemeController,
     install_theme,
+    is_theme_updating,
     refresh_themed_widgets,
     repolish,
 )
@@ -730,6 +731,7 @@ class MainWindow(QMainWindow):
         self.error_details = QPlainTextEdit(panel)
         self.error_details.setObjectName("main_error_details")
         self.error_details.setReadOnly(True)
+        self.error_details.setProperty("afvReadonly", True)
         self.error_details.setFont(make_mono_font(self.error_details))
         self.error_details.setMaximumHeight(120)
         set_accessible(
@@ -1158,7 +1160,7 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event: QEvent) -> None:
         """Refresh themed SVG pixmaps and primary icons on palette or style updates."""
         super().changeEvent(event)
-        if event.type() in (
+        if not is_theme_updating() and event.type() in (
             QEvent.Type.PaletteChange,
             QEvent.Type.ApplicationPaletteChange,
             QEvent.Type.StyleChange,

@@ -309,11 +309,13 @@ class SvgIconEngine(QIconEngine):
 
     Renders crisp vector icons at any requested size or device pixel ratio
     (including fractional scales such as 125%, 150%, and 175%) and tints
-    ``currentColor`` dynamically from ``QPalette.ColorRole.ButtonText`` (or
-    ``QPalette.ColorRole.HighlightedText`` for ``QIcon.Mode.Selected``) at
-    paint time so light, dark, and high-contrast themes update automatically.
-    Semantic ``status_*`` icons automatically swap to luminous dark-mode fills
-    whenever the active application window palette is dark.
+    ``currentColor`` dynamically using ``QPalette.ColorRole.ButtonText`` for
+    normal mode, ``QPalette.ColorRole.HighlightedText`` for
+    ``QIcon.Mode.Selected``, and the ``Disabled`` group's ``ButtonText`` for
+    ``QIcon.Mode.Disabled`` at paint time so light, dark, and high-contrast
+    themes update automatically. Semantic ``status_*`` icons automatically swap
+    to luminous dark-mode fills whenever the active application window palette
+    is dark.
     """
 
     def __init__(
@@ -369,13 +371,17 @@ class SvgIconEngine(QIconEngine):
     def _resolve_render_key(self, mode: QIcon.Mode) -> tuple[str, bool]:
         if not self._has_current_color:
             return (_status_color_key(self._name), mode == QIcon.Mode.Disabled)
+        if mode == QIcon.Mode.Disabled:
+            return (
+                _resolve_color_hex(None, mode=QIcon.Mode.Disabled, color_role=self._color_role),
+                False,
+            )
         color_hex = (
             self._fixed_color
             if self._fixed_color is not None
             else _resolve_color_hex(None, mode=mode, color_role=self._color_role)
         )
-        apply_fade = mode == QIcon.Mode.Disabled and self._fixed_color is not None
-        return (color_hex, apply_fade)
+        return (color_hex, False)
 
     def paint(
         self,

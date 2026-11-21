@@ -336,6 +336,7 @@ class PlanningScreen(QWidget):
         scroll.setWidget(body)
         outer_layout.addWidget(scroll)
 
+        self._active_phase_idx: int | None = None
         self._set_phase("scan")
 
         # Wire widget events and controller signals via bound methods only.
@@ -373,13 +374,16 @@ class PlanningScreen(QWidget):
 
     def _set_phase(self, phase: str) -> None:
         """Update the 3-step sub-phase indicator strip inside the planning card."""
+        active_order = {"scan": 0, "probe": 1, "match": 2, "done": 3}
+        active_idx = active_order.get(phase, 0)
+        if active_idx == self._active_phase_idx:
+            return
+        self._active_phase_idx = active_idx
         steps: tuple[tuple[str, str, str], ...] = (
             ("scan", "1. Scan", "Scan"),
             ("probe", "2. Probe", "Probe"),
             ("match", "3. Match", "Match"),
         )
-        active_order = {"scan": 0, "probe": 1, "match": 2, "done": 3}
-        active_idx = active_order.get(phase, 0)
         for idx, (key, numbered, short_name) in enumerate(steps):
             pill = self._phase_labels[key]
             if idx < active_idx:
@@ -450,6 +454,7 @@ class PlanningScreen(QWidget):
         self._last_announced_bucket = -1
         self._last_announced_text = ""
         self._cancelling = False
+        self._active_phase_idx = None
         self._set_phase("scan")
         self.status_line.set_status("status_working", "Scanning folders…")
         self.detail_label.setText("")

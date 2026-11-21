@@ -12,6 +12,7 @@ from audio_from_video.gui.controller import ControllerState
 
 if TYPE_CHECKING:
     from audio_from_video.config import AppConfig
+    from audio_from_video.gui.controller import FallbackConfigState
     from audio_from_video.models import PlanItem
     from audio_from_video.session import RunOptions
 
@@ -83,6 +84,25 @@ class FakeController(QObject):
     def config(self) -> AppConfig | None:
         """Return the configured ``AppConfig``, if any."""
         return self._config
+
+    @property
+    def effective_config(self) -> AppConfig:
+        """Return the active ``AppConfig`` snapshot matching ``RunController``."""
+        if self._config is not None:
+            return self._config
+        from audio_from_video.config import default_config_path
+        from audio_from_video.gui.controller import build_fallback_config
+
+        try:
+            target = default_config_path()
+        except OSError:
+            target = None
+        return build_fallback_config(target)[0]
+
+    @property
+    def fallback_config_state(self) -> FallbackConfigState | None:
+        """Return ``None`` (no pre-cached disk fallback state in test doubles)."""
+        return None
 
     @property
     def plan_items(self) -> list[PlanItem]:

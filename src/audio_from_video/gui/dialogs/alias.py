@@ -31,7 +31,7 @@ from audio_from_video.gui.dialogs._common import (
     make_heading_font,
     set_button_role,
 )
-from audio_from_video.gui.theme import refresh_themed_widgets, repolish
+from audio_from_video.gui.theme import is_theme_updating, refresh_themed_widgets, repolish
 from audio_from_video.planner import AliasAction, AliasPromptResponse
 
 if TYPE_CHECKING:
@@ -382,17 +382,26 @@ class AliasDialog(QDialog):
         set_button_role(self._keep_item_button, "secondary" if has_text else "primary")
         self._use_english_button.setIcon(dialog_button_icon("check_mark", on_primary=has_text))
 
+    def _refresh_themed_visuals(self) -> None:
+        """Refresh the primary button icon contrast on theme updates."""
+        if hasattr(self, "_alias_edit"):
+            has_text = bool(self._alias_edit.text().strip())
+            self._use_english_button.setIcon(dialog_button_icon("check_mark", on_primary=has_text))
+
     def changeEvent(self, event: QEvent) -> None:
         """Refresh button icon contrast on live theme or palette changes."""
         super().changeEvent(event)
-        if event.type() in (
-            QEvent.Type.PaletteChange,
-            QEvent.Type.ApplicationPaletteChange,
-            QEvent.Type.StyleChange,
-        ) and hasattr(self, "_alias_edit"):
+        if (
+            not is_theme_updating()
+            and event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+                QEvent.Type.StyleChange,
+            )
+            and hasattr(self, "_alias_edit")
+        ):
             refresh_themed_widgets(self)
-            has_text = bool(self._alias_edit.text().strip())
-            self._use_english_button.setIcon(dialog_button_icon("check_mark", on_primary=has_text))
 
     def _emit_answer(self, response: AliasPromptResponse, *, accepted: bool) -> None:
         if self._answered or self._withdrawn:

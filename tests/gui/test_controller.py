@@ -447,7 +447,15 @@ def test_frozen_signatures_and_signals_match_fakes() -> None:
     fc_props = sorted(
         name for name, val in vars(FakeController).items() if isinstance(val, property)
     )
-    assert rc_props == ["config", "offline_default", "output_root", "plan_items", "state"]
+    assert rc_props == [
+        "config",
+        "effective_config",
+        "fallback_config_state",
+        "offline_default",
+        "output_root",
+        "plan_items",
+        "state",
+    ]
     assert rc_props == fc_props
 
     expected_commands = sorted(
@@ -5743,3 +5751,100 @@ def test_invalid_config_with_valid_env_contact_blocks_online_plan(
     assert input_errs[0][0] == "missing_contact"
     assert "321k" in input_errs[0][1]
     assert setup_errs == [input_errs[0][1]]
+
+
+def test_online_start_plan_adopts_reloaded_config_when_fixed_externally(
+    qtbot: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """After an offline detour from a broken config, fixing config.toml adopts the contact."""
+    cfg_path = tmp_path / "config.toml"
+    cfg_path.write_text('[audio]\nquality = "321k"\n', encoding="utf-8")
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(cfg_path))
+    monkeypatch.delenv("AFV_MB_CONTACT", raising=False)
+    monkeypatch.delenv("AFV_MB_USER_AGENT", raising=False)
+    _install_preflight_binaries(monkeypatch, tmp_path)
+
+    ctrl = RunController(cache_dir=tmp_path / "cache")
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000):
+        ctrl.start_preflight()
+    assert ctrl.state == ControllerState.SETUP
+    assert ctrl.config is None
+
+    with qtbot.waitSignal(ctrl.state_changed, timeout=5000):
+        ctrl.use_offline_only()
+    qtbot.waitUntil(lambda: ctrl._preflight_thread is None, timeout=5000)
+    assert ctrl.state == ControllerState.INPUTS
+
+    # Fix config.toml externally with a valid quality (changed from built-in 320k -> 192k)
+    # and a MusicBrainz contact.
+    cfg_path.write_text(
+        f'[audio]\nquality = "192k"\n[musicbrainz]\ncontact = "{TEST_CONTACT}"\n',
+        encoding="utf-8",
+    )
+
+    captured_user_agents: list[str | None] = []
+    captured_qualities: list[str] = []
+
+    class _FakePlanWorker(controller_mod.PlanWorker):
+        def run(self) -> None:
+            captured_user_agents.append(self._user_agent)
+            captured_qualities.append(self._config.audio.quality)
+            self._relay.finished.emit()
+
+    monkeypatch.setattr(controller_mod, "PlanWorker", _FakePlanWorker)
+
+    input_errs: list[tuple[str, str]] = []
+    saved_configs: list[object] = []
+    ctrl.input_error.connect(lambda k, m: input_errs.append((k, m)))
+    ctrl.settings_saved.connect(saved_configs.append)
+
+    clip = _make_video(tmp_path / "media")
+    # First attempt pauses on INPUTS so the screen shows the refreshed 192k default before running.
+    ctrl.start_plan(RunOptions(inputs=(clip,), offline=False))
+    assert ctrl.state == ControllerState.INPUTS
+    assert ctrl._plan_thread is None
+    assert len(input_errs) == 1
+    assert input_errs[0][0] == "config_changed"
+    assert len(saved_configs) == 1
+    assert ctrl.config is not None
+    assert ctrl.config.musicbrainz.contact == TEST_CONTACT
+    assert ctrl.config.audio.quality == "192k"
+    assert captured_qualities == []
+
+    # Second attempt launches immediately using the adopted 192k config and resolved contact UA.
+    ctrl.start_plan(RunOptions(inputs=(clip,), offline=False))
+    qtbot.waitUntil(lambda: ctrl._plan_thread is None, timeout=5000)
+
+    assert len(captured_user_agents) == 1
+    assert captured_user_agents[0] is not None
+    assert TEST_CONTACT in captured_user_agents[0]
+    assert captured_qualities == ["192k"]
+    ctrl.shutdown()
+
+    # Contact-only fix (defaults unchanged at 320k) launches immediately on the first click.
+    cfg_path.write_text('[audio]\nquality = "321k"\n', encoding="utf-8")
+    ctrl2 = RunController(cache_dir=tmp_path / "cache2")
+    with qtbot.waitSignal(ctrl2.state_changed, timeout=5000):
+        ctrl2.start_preflight()
+    with qtbot.waitSignal(ctrl2.state_changed, timeout=5000):
+        ctrl2.use_offline_only()
+    qtbot.waitUntil(lambda: ctrl2._preflight_thread is None, timeout=5000)
+    assert ctrl2.state == ControllerState.INPUTS
+
+    cfg_path.write_text(
+        f'[audio]\nquality = "320k"\n[musicbrainz]\ncontact = "{TEST_CONTACT}"\n',
+        encoding="utf-8",
+    )
+    captured_user_agents.clear()
+    captured_qualities.clear()
+    errs2: list[tuple[str, str]] = []
+    ctrl2.input_error.connect(lambda k, m: errs2.append((k, m)))
+    ctrl2.start_plan(RunOptions(inputs=(clip,), offline=False))
+    qtbot.waitUntil(lambda: ctrl2._plan_thread is None, timeout=5000)
+    assert errs2 == []
+    assert ctrl2.config is not None
+    assert ctrl2.config.audio.quality == "320k"
+    assert len(captured_user_agents) == 1
+    assert captured_user_agents[0] is not None
+    assert TEST_CONTACT in captured_user_agents[0]
+    ctrl2.shutdown()
