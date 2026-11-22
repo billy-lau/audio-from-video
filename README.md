@@ -221,12 +221,13 @@ afv-gui
 
 - **macOS:** 14 (Sonoma) or newer.
 - **Windows:** 10 or newer.
-- **Linux:** Ubuntu 22.04 or newer (and comparable desktops), with **Python 3.12 or newer**.
-  PySide6 6.12, the Qt library the app uses, has a bug in its Linux build that crashes Python
-  3.11 after a while, so `pip install "audio-from-video[gui]"` skips the GUI on Linux with Python
-  3.11 and `afv-gui` explains how to get a newer Python. The `afv` command-line tool still works
-  on Python 3.11. On headless or minimal Ubuntu/Debian systems, install the Qt runtime libraries
-  first:
+- **Linux:** **Python 3.12 or newer**, on Ubuntu 22.04 / Debian 12 or newer for x86_64, or
+  Ubuntu 24.04 / Debian 13 or newer for ARM64 (PySide6's ARM64 build needs glibc 2.39). PySide6
+  6.12, the Qt library the app uses, has a reference-counting bug in its Linux build that
+  crashes Python 3.11 after a while, so installing with the `gui` extra skips the GUI on Linux
+  with Python 3.11 and `afv-gui` explains how to get a newer Python. The `afv` command-line tool
+  still works on Python 3.11. On headless or minimal Ubuntu/Debian systems, install the Qt
+  runtime libraries first:
 
 ```bash
 sudo apt install libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3

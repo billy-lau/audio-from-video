@@ -9,8 +9,9 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 
-# PySide6 6.12's Linux build drops a reference to True on every Signal.emit() from
-# Python. Python 3.12 made True immortal; on 3.11 the app would eventually abort.
+# PySide6 6.12's Linux build drops references it doesn't own on many calls: one to True
+# on every Signal.emit(), and one to None on every call that returns None (for example,
+# any setter). Python 3.12 made True and None immortal; on 3.11 the app would abort.
 LINUX_MIN_PYTHON = (3, 12)
 
 
@@ -28,8 +29,8 @@ def unsupported_runtime_message(
             f"(this is Python {major}.{minor}). The Qt library it uses (PySide6 6.12) has a "
             "bug on Linux that crashes Python 3.11 after a while.\n"
             f"Install the app with Python {need} or newer (for example: "
-            f'uv tool install --python {need} "audio-from-video[gui]"), or use the afv '
-            "command-line tool, which works on this Python."
+            f'uv tool install --python {need} "/path/to/audio_from_video[gui]"), or use the '
+            "afv command-line tool, which works on this Python."
         )
     return None
 

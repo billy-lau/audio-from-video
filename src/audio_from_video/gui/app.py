@@ -1197,6 +1197,14 @@ def _drain_active_workers_before_exit(app: QApplication, controller: RunControll
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Launch the ``afv-gui`` desktop application."""
+    # Repeat the launcher's runtime check for callers that start the app directly.
+    from audio_from_video.gui.launcher import unsupported_runtime_message
+
+    unsupported = unsupported_runtime_message()
+    if unsupported is not None:
+        print(unsupported, file=sys.stderr)
+        return 1
+
     qt_argv = list(sys.argv if argv is None else argv)
     if not qt_argv:
         qt_argv = [SETTINGS_APPLICATION]

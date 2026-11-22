@@ -81,6 +81,13 @@ jobs:
             python-version: "3.15"
           - os: windows-latest
             python-version: "3.15"
+          # The desktop app still supports Python 3.11 on macOS and Windows. Only 3.11 can
+          # reveal PySide6 refcount leaks (3.12+ made True and None immortal), so these
+          # jobs run the guard test in tests/gui/test_00_pyside_refcount_leak.py for real.
+          - os: macos-latest
+            python-version: "3.11"
+          - os: windows-latest
+            python-version: "3.11"
 
     steps:
       - name: Checkout repository
