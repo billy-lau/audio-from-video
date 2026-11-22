@@ -338,6 +338,7 @@ def test_real_subprocess_cli_offline_end_to_end_and_plain_log_file(tmp_path: Pat
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert completed.returncode == 0, completed.stderr + completed.stdout
@@ -752,6 +753,7 @@ def test_real_run_surfaces_bitrate_clamp_warning_and_clean_output_root_line(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env={**os.environ, "COLUMNS": "220"},
         check=False,
     )
@@ -775,6 +777,7 @@ def test_real_run_surfaces_bitrate_clamp_warning_and_clean_output_root_line(
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         env={**os.environ, "COLUMNS": "220"},
         check=False,
     )

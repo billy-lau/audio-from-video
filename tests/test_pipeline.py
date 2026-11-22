@@ -1164,6 +1164,7 @@ def test_cli_subprocess_normalize_report_and_plain_log_file(tmp_path: Path) -> N
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert completed.returncode == 0, completed.stderr + completed.stdout
