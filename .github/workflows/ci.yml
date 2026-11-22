@@ -119,5 +119,17 @@ jobs:
         run: ruff check .
 
       - name: Run pytest
-        # Verbose, so a crash in native Qt code shows which test was running.
-        run: pytest -v
+        # Verbose, so a crash in native Qt code shows which test was running, and with
+        # sys-level capture, so native error messages (from Qt or the C library) reach
+        # the log instead of a capture file that is lost when the process aborts.
+        env:
+          PYTHONFAULTHANDLER: "1"
+        run: pytest -v --capture=sys
+
+      - name: Run layout tests with the native Windows platform
+        # Real system font and DPI, with no test font override: catches real overflow.
+        # Runs even if the step above failed, so both results are visible.
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
+        env:
+          QT_QPA_PLATFORM: windows
+        run: pytest -v tests/gui/test_theme_and_layout.py

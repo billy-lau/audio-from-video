@@ -19,6 +19,7 @@ class MissingBinaryError(RuntimeError):
 
 
 BUNDLED_DIR_ENV_VAR = "AFV_BUNDLED_FFMPEG_DIR"
+_SLOW_START_TIMEOUT = 60.0
 """Developer override pointing at a folder laid out like a frozen app's ``ffmpeg/bin``."""
 
 
@@ -91,7 +92,11 @@ def _resolve_single_binary(
         candidate = _bundled_candidate(name, bundled_dir)
         if not candidate.is_file():
             bundled_problem = "is missing"
-        elif get_binary_version(candidate) is None:
+        elif (
+            get_binary_version(candidate) is None
+            # The first start can be slow while antivirus scans the DLLs; allow more time.
+            and get_binary_version(candidate, timeout=_SLOW_START_TIMEOUT) is None
+        ):
             # Present but unable to start, e.g. antivirus removed one of its DLLs.
             bundled_problem = "cannot start"
         else:
@@ -222,8 +227,8 @@ def format_install_instructions(platform_name: str | None = None) -> str:
     )
 
 
-def get_binary_version(binary_path: Path) -> str | None:
-    """Return the first line of '<binary> -version', or None if execution fails."""
+def get_binary_version(binary_path: Path, *, timeout: float = 10) -> str | None:
+    """Return the first line of '<binary> -version', or None if it fails or times out."""
     try:
         completed = subprocess.run(
             [str(binary_path), "-version"],
@@ -231,10 +236,10 @@ def get_binary_version(binary_path: Path) -> str | None:
             creationflags=no_window_creationflags(),
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=timeout,
             check=False,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if completed.returncode != 0:
         return None
@@ -254,7 +259,7 @@ def has_libmp3lame(ffmpeg_path: Path) -> bool:
             timeout=10,
             check=False,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return False
     if completed.returncode != 0:
         return False

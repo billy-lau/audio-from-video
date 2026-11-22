@@ -95,18 +95,31 @@ try {
     Assert-True ($doctorText -match "Chinese conversion\W+OK") "the Chinese conversion dictionaries load"
 
     Write-Host "==> 3. Offline extraction"
-    $Sample = Join-Path $InputDir "Smoke Test Artist - Smoke Test Song.mp4"
-    & $FFmpeg -hide_banner -loglevel error -y `
-        -f lavfi -i "sine=frequency=440:duration=3" `
-        -f lavfi -i "color=c=blue:s=320x240:d=3" `
-        -shortest -c:v mpeg4 -c:a aac $Sample
-    Assert-True ($LASTEXITCODE -eq 0 -and (Test-Path $Sample)) "generated a test video with the bundled FFmpeg"
-    & $Afv extract $InputDir --offline --non-interactive --output-dir $OutputDir
-    Assert-True ($LASTEXITCODE -eq 0) "afv extract exit code is 0 (was $LASTEXITCODE)"
-    $mp3 = Get-ChildItem $OutputDir -Recurse -Filter "*.mp3" | Select-Object -First 1
-    Assert-True ($null -ne $mp3) "an MP3 was written"
-    $codec = (& $FFprobe -v error -select_streams a:0 -show_entries stream=codec_name -of "default=nw=1:nk=1" $mp3.FullName | Out-String).Trim()
-    Assert-True ($codec -eq "mp3") "the output audio codec is mp3 ($($mp3.Name))"
+    # Name the second file in Chinese (built from code points so this script stays ASCII):
+    # "Zhou Jielun - Qing Tian" in Traditional Chinese characters.
+    $CjkTitle = -join [char[]](0x6674, 0x5929)
+    $CjkName = (-join [char[]](0x5468, 0x6770, 0x502B)) + " - " + $CjkTitle + ".mp4"
+    foreach ($name in @("Smoke Test Artist - Smoke Test Song.mp4", $CjkName)) {
+        $Sample = Join-Path $InputDir $name
+        & $FFmpeg -hide_banner -loglevel error -y `
+            -f lavfi -i "sine=frequency=440:duration=3" `
+            -f lavfi -i "color=c=blue:s=320x240:d=3" `
+            -shortest -c:v mpeg4 -c:a aac $Sample
+        Assert-True ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $Sample)) "generated a test video with the bundled FFmpeg"
+    }
+    # Redirect stdout to a file: non-Latin names must not crash the encoder there.
+    $ExtractLog = Join-Path $Work "extract.log"
+    & $Afv extract $InputDir --offline --non-interactive --output-dir $OutputDir > $ExtractLog
+    $extractExit = $LASTEXITCODE
+    Get-Content -LiteralPath $ExtractLog | Write-Host
+    Assert-True ($extractExit -eq 0) "afv extract exit code is 0 (was $extractExit)"
+    $mp3s = @(Get-ChildItem $OutputDir -Recurse -Filter "*.mp3")
+    Assert-True ($mp3s.Count -eq 2) "two MP3s were written (found $($mp3s.Count))"
+    Assert-True (@($mp3s | Where-Object { $_.Name -like "*$CjkTitle*" }).Count -eq 1) "the Chinese-named file kept its name"
+    foreach ($mp3 in $mp3s) {
+        $codec = (& $FFprobe -v error -select_streams a:0 -show_entries stream=codec_name -of "default=nw=1:nk=1" $mp3.FullName | Out-String).Trim()
+        Assert-True ($codec -eq "mp3") "the output audio codec is mp3"
+    }
 
     Write-Host "==> 4. Desktop app launch"
     $guiProc = Start-Process -FilePath $Gui -PassThru

@@ -39,10 +39,14 @@ def analysis(script):
 gui_a = analysis("launch_gui.py")
 cli_a = analysis("launch_cli.py")
 
+# Run Python in UTF-8 mode, so file names in any script survive output redirected
+# to a file or pipe (Windows otherwise uses the legacy code page there).
+utf8_mode = [("X utf8", None, "OPTION")]
+
 gui_exe = EXE(
     PYZ(gui_a.pure),
     gui_a.scripts,
-    [],
+    utf8_mode,
     exclude_binaries=True,
     name="Audio from Video",
     icon=icon,
@@ -52,7 +56,7 @@ gui_exe = EXE(
 cli_exe = EXE(
     PYZ(cli_a.pure),
     cli_a.scripts,
-    [],
+    utf8_mode,
     exclude_binaries=True,
     name="afv",
     icon=icon,

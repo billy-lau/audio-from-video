@@ -852,8 +852,30 @@ def cache_clear_command(
     )
 
 
+def _use_utf8_for_redirected_output() -> None:
+    """Write UTF-8 when output goes to a file or pipe instead of a console window.
+
+    On Windows, Python before 3.15 encodes redirected output with the legacy code
+    page (for example cp1252), so printing Chinese, Japanese, or Korean file names
+    would crash with ``UnicodeEncodeError``. Console windows already handle Unicode
+    and are left alone. Characters that still cannot be encoded are replaced.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or not hasattr(stream, "reconfigure"):
+            continue
+        try:
+            if stream.isatty():
+                continue
+            encoding = (stream.encoding or "").lower().replace("-", "").replace("_", "")
+            if encoding != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
 def main() -> None:
     """Console script entry point for 'afv' and 'audio-from-video'."""
+    _use_utf8_for_redirected_output()
     app()
 
 

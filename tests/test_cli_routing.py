@@ -135,3 +135,31 @@ def test_cli_validation_guardrails_exit_code_2(tmp_path: Path, monkeypatch: obje
     fb = make_video_with_audio(dir_b / "b.mp4")
     res_roots = runner.invoke(app, ["--offline", "--dry-run", str(fa), str(fb)])
     assert res_roots.exit_code == 2
+
+
+def test_redirected_output_handles_cjk_names_with_legacy_code_page(tmp_path: Path) -> None:
+    """Output to a file or pipe must not crash on non-Latin names under cp1252 (Windows)."""
+    import os
+    import subprocess
+    import sys
+
+    in_dir = tmp_path / "in"
+    make_video_with_audio(in_dir / "周杰倫 - 晴天.mp4")
+    env = {
+        **os.environ,
+        "PYTHONIOENCODING": "cp1252",
+        "PYTHONUTF8": "0",
+        "AFV_CONFIG_PATH": str(tmp_path / "config.toml"),
+    }
+    cmd = [sys.executable, "-m", "audio_from_video.cli.main", "extract", str(in_dir)]
+    completed = subprocess.run(
+        [*cmd, "--offline", "--dry-run"],
+        capture_output=True,
+        env=env,
+        timeout=120,
+        check=False,
+    )
+    stderr = completed.stderr.decode("utf-8", errors="replace")
+    assert completed.returncode == 0, stderr
+    assert "UnicodeEncodeError" not in stderr
+    assert "晴天" in completed.stdout.decode("utf-8")

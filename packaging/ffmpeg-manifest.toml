@@ -21,6 +21,13 @@
 #      for `build_recipe_commit`, and the full FFmpeg commit named in the asset
 #      (the part after "-g") for `source_commit`.
 #   5. Download both source archives and record their SHA-256 values.
+#
+# Note: the two source archives are GitHub's auto-generated tarballs
+# (/archive/<commit>.tar.gz). GitHub doesn't promise their bytes stay identical
+# forever, so a SHA-256 mismatch on one of them (and only them) may be a
+# re-compression rather than different content. The build stops either way. To
+# check, unpack the new and old tarballs and compare the files (for example, with
+# `diff -r`); if they match, record the new SHA-256.
 
 [windows-x64]
 version = "n9.0.2-39-g7adfbe40dc"

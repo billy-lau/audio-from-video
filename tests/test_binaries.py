@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -141,7 +142,8 @@ def runnable_unless(monkeypatch: pytest.MonkeyPatch) -> set[str]:
     """Stub the bundled-binary start check; file names added to the set fail to start."""
     broken: set[str] = set()
 
-    def _fake_version(path: Path) -> str | None:
+    def _fake_version(path: Path, *, timeout: float = 10) -> str | None:
+        _ = timeout
         return None if Path(path).name in broken else f"{Path(path).stem} version test"
 
     monkeypatch.setattr(binaries_mod, "get_binary_version", _fake_version)
@@ -276,3 +278,33 @@ def test_bundled_lookup_uses_exe_names_on_windows(
     assert ffmpeg_res.source == "bundled" and ffmpeg_res.path is not None
     assert ffmpeg_res.path.name == "ffmpeg.exe"
     assert ffprobe_res.path is not None and ffprobe_res.path.name == "ffprobe.exe"
+
+
+def test_binary_checks_survive_timeouts_and_bundled_slow_start_gets_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[float] = []
+
+    def _slow_then_ok(cmd: list[str], **kwargs: object) -> object:
+        timeout = float(kwargs["timeout"])  # type: ignore[arg-type]
+        calls.append(timeout)
+        if timeout < 60:
+            raise subprocess.TimeoutExpired(cmd, timeout)
+        return subprocess.CompletedProcess(cmd, 0, stdout="ffmpeg version slow\n", stderr="")
+
+    monkeypatch.setattr(binaries_mod.subprocess, "run", _slow_then_ok)
+    fake = tmp_path / "ffmpeg"
+    fake.write_text("x", encoding="utf-8")
+
+    # Timeouts no longer escape as exceptions.
+    assert get_binary_version(fake) is None
+    assert has_libmp3lame(fake) is False
+
+    # A bundled copy that is slow to start the first time is retried with more time.
+    bin_dir = _make_bundled_layout(tmp_path / "app")
+    calls.clear()
+    ffmpeg_res, _ = inspect_binaries(
+        config=AppConfig(), env={"PATH": "", BUNDLED_DIR_ENV_VAR: str(bin_dir)}
+    )
+    assert ffmpeg_res.found and ffmpeg_res.source == "bundled"
+    assert calls[:2] == [10, 60]
