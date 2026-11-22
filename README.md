@@ -221,8 +221,12 @@ afv-gui
 
 - **macOS:** 14 (Sonoma) or newer.
 - **Windows:** 10 or newer.
-- **Linux:** Ubuntu 22.04 or newer (and comparable desktops). On headless or minimal Ubuntu/Debian
-  systems, install the Qt runtime libraries first:
+- **Linux:** Ubuntu 22.04 or newer (and comparable desktops), with **Python 3.12 or newer**.
+  PySide6 6.12, the Qt library the app uses, has a bug in its Linux build that crashes Python
+  3.11 after a while, so `pip install "audio-from-video[gui]"` skips the GUI on Linux with Python
+  3.11 and `afv-gui` explains how to get a newer Python. The `afv` command-line tool still works
+  on Python 3.11. On headless or minimal Ubuntu/Debian systems, install the Qt runtime libraries
+  first:
 
 ```bash
 sudo apt install libegl1 libxkbcommon0 libfontconfig1 libdbus-1-3
@@ -459,6 +463,13 @@ pytest
 The tests generate small media files with FFmpeg and replay recorded MusicBrainz and iTunes
 responses, so they need FFmpeg but no network access or contact. CI runs on Ubuntu (Python 3.11
 and 3.15), macOS, and Windows.
+
+To run CI's Linux checks locally before pushing (x86_64 Linux, in a throwaway container), use
+`scripts/ci-linux/run.sh <python-version> [pytest arguments]`, for example
+`scripts/ci-linux/run.sh 3.11` or `scripts/ci-linux/run.sh 3.12 tests/gui`. It needs a
+Docker-compatible runtime such as [Colima](https://github.com/abiosoft/colima)
+(`brew install colima docker`, then `colima start --vm-type vz --vz-rosetta`). Your working tree
+is mounted read-only, so uncommitted changes are tested and nothing is written back.
 
 ## Building the Windows installer
 

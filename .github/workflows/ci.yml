@@ -72,8 +72,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # The desktop app needs Python 3.12+ on Linux (see gui/launcher.py).
           - os: ubuntu-latest
-            python-version: "3.11"
+            python-version: "3.12"
           - os: ubuntu-latest
             python-version: "3.15"
           - os: macos-latest
@@ -122,11 +123,8 @@ jobs:
         # Verbose, so a crash in native Qt code shows which test was running, and with
         # sys-level capture, so native error messages (from Qt or the C library) reach
         # the log instead of a capture file that is lost when the process aborts.
-        # On Python 3.11, also log new lows of the True/False refcounts per test, to find
-        # the native refcount bug behind "bool_dealloc: deallocating True or False".
         env:
           PYTHONFAULTHANDLER: "1"
-          AFV_TRACE_BOOL_REFCOUNTS: "1"
         run: pytest -v --capture=sys
 
       - name: Run layout tests with the native Windows platform

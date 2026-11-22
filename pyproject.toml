@@ -44,10 +44,13 @@ dev = [
     "ruff>=0.8,<1.0",
 ]
 gui = [
-    "PySide6-Essentials>=6.12,<7",
+    # Not on Linux with Python 3.11: PySide6 6.12's Linux build leaks a reference to True
+    # on every Signal.emit(), which crashes Python 3.11 (see audio_from_video.gui.launcher).
+    "PySide6-Essentials>=6.12,<7; sys_platform != 'linux' or python_version >= '3.12'",
 ]
 test-gui = [
-    "pytest-qt>=4.5",
+    # Same platforms as the gui extra; pytest-qt refuses to start without a Qt binding.
+    "pytest-qt>=4.5; sys_platform != 'linux' or python_version >= '3.12'",
 ]
 
 [project.scripts]
@@ -55,7 +58,7 @@ afv = "audio_from_video.cli.main:main"
 audio-from-video = "audio_from_video.cli.main:main"
 
 [project.gui-scripts]
-afv-gui = "audio_from_video.gui.app:main"
+afv-gui = "audio_from_video.gui.launcher:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/audio_from_video"]

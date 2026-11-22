@@ -474,17 +474,19 @@ def test_app_module_hygiene_and_rule2_compliance() -> None:
 
 
 def test_afv_gui_entrypoint_resolves_to_app_main() -> None:
-    """Confirm ``afv-gui`` gui-script metadata points at ``audio_from_video.gui.app:main``."""
+    """Confirm ``afv-gui`` points at the launcher, which starts ``gui.app.main``."""
+    from audio_from_video.gui import launcher as launcher_mod
+
     gui_eps = importlib.metadata.entry_points(group="gui_scripts")
     matching = [ep for ep in gui_eps if ep.name == "afv-gui"]
     assert len(matching) == 1
-    assert matching[0].value == "audio_from_video.gui.app:main"
-    assert matching[0].load() is app_mod.main
+    assert matching[0].value == "audio_from_video.gui.launcher:main"
+    assert matching[0].load() is launcher_mod.main
 
     launcher = Path(sys.executable).parent / "afv-gui"
     if launcher.is_file():
         script_text = launcher.read_text(encoding="utf-8")
-        assert "from audio_from_video.gui.app import main" in script_text
+        assert "from audio_from_video.gui.launcher import main" in script_text
 
 
 # ---------------------------------------------------------------------------

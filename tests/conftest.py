@@ -2,42 +2,12 @@
 
 from __future__ import annotations
 
-import gc
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-
-# Diagnostic for a native refcount bug that drains True/False until Python aborts with
-# "bool_dealloc: deallocating True or False". Only meaningful before Python 3.12, which
-# made True and False immortal. CI enables it with AFV_TRACE_BOOL_REFCOUNTS=1.
-_TRACE_BOOL_REFCOUNTS = os.environ.get("AFV_TRACE_BOOL_REFCOUNTS") == "1" and sys.version_info < (
-    3,
-    12,
-)
-_bool_refs_before = [sys.getrefcount(True), sys.getrefcount(False)]
-
-
-@pytest.hookimpl(trylast=True)
-def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str]) -> None:
-    """When tracing, log tests that lower the True/False refcounts by more than 25."""
-    _ = location
-    if not _TRACE_BOOL_REFCOUNTS:
-        return
-    gc.collect()
-    now = [sys.getrefcount(True), sys.getrefcount(False)]
-    drops = [before - value for before, value in zip(_bool_refs_before, now, strict=True)]
-    if max(drops) > 25:
-        print(
-            f"[bool refcounts] True={now[0]} ({-drops[0]:+d}) False={now[1]} ({-drops[1]:+d}) "
-            f"after {nodeid}",
-            file=sys.__stderr__,
-            flush=True,
-        )
-    _bool_refs_before[:] = now
 
 
 @pytest.fixture(autouse=True)
