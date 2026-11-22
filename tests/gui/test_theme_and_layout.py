@@ -3773,9 +3773,13 @@ def test_high_contrast_switch_restores_os_palette_and_leaves_hc_on_palette_chang
 ) -> None:
     """M1: light -> HC -> light restores the OS palette and exits HC stylesheet cleanly."""
     _ = theme_snapshot
-    os_default = QPalette()
-    os_win = os_default.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name()
-    os_hl = os_default.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight).name()
+
+    # Read the OS palette as it resolves under the style the theme installs (Fusion):
+    # on native platforms the resolved colors depend on the active style.
+    apply_theme(qapp, "light", high_contrast=False)
+    qapp.setPalette(QPalette())
+    os_win = qapp.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Window).name()
+    os_hl = qapp.palette().color(QPalette.ColorGroup.Active, QPalette.ColorRole.Highlight).name()
 
     # 1. Start in light Slate -> switch to high contrast -> restores OS palette roles.
     apply_theme(qapp, "light", high_contrast=False)

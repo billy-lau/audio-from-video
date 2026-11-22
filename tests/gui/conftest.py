@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from typing import Any
 
@@ -48,28 +49,36 @@ def _block_real_http_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _platform_ui_font(qapp: Any, pytestconfig: pytest.Config) -> None:
-    """Give offscreen Qt on Windows the UI font that real Windows sessions use.
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip layout measurements under offscreen Qt on Windows, where no fonts load.
 
-    The offscreen platform plugin does not pick up the Windows system font, so
-    width-based layout tests would measure a substitute font instead. The native
-    Windows plugin uses the system message font, Segoe UI 9 pt. CI also runs the
-    layout tests on the native plugin with no override. On Windows, the font in use
-    is written to the test log.
+    The offscreen platform plugin on Windows has an empty font database, so every
+    text width it reports is meaningless. CI runs ``test_theme_and_layout.py`` again on
+    the native Windows platform, with the real system font, instead.
     """
+    _ = config
+    if sys.platform != "win32" or os.environ.get("QT_QPA_PLATFORM", "") != "offscreen":
+        return
+    skip = pytest.mark.skip(
+        reason="offscreen Qt on Windows has no fonts; run with QT_QPA_PLATFORM=windows"
+    )
+    for item in items:
+        if item.path.name == "test_theme_and_layout.py":
+            item.add_marker(skip)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _log_windows_ui_font(qapp: Any, pytestconfig: pytest.Config) -> None:
+    """On Windows, write the Qt platform and resolved UI font to the test log."""
     if sys.platform != "win32":
         return
-    from PySide6.QtGui import QFont, QFontInfo
+    from PySide6.QtGui import QFontInfo
 
-    def describe(font: QFont) -> str:
-        info = QFontInfo(font)
-        return f"{font.family()} {font.pointSizeF():g}pt -> {info.family()} {info.pixelSize()}px"
-
-    message = f"Qt platform {qapp.platformName()!r}, UI font {describe(qapp.font())}"
-    if qapp.platformName() == "offscreen":
-        qapp.setFont(QFont("Segoe UI", 9))
-        message += f"; using {describe(qapp.font())}"
+    font = qapp.font()
+    info = QFontInfo(font)
     reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
     if reporter is not None:
-        reporter.write_line(message)
+        reporter.write_line(
+            f"Qt platform {qapp.platformName()!r}, UI font {font.family()} "
+            f"{font.pointSizeF():g}pt -> {info.family()!r} {info.pixelSize()}px"
+        )

@@ -122,12 +122,16 @@ jobs:
         # Verbose, so a crash in native Qt code shows which test was running, and with
         # sys-level capture, so native error messages (from Qt or the C library) reach
         # the log instead of a capture file that is lost when the process aborts.
+        # On Python 3.11, also log new lows of the True/False refcounts per test, to find
+        # the native refcount bug behind "bool_dealloc: deallocating True or False".
         env:
           PYTHONFAULTHANDLER: "1"
+          AFV_TRACE_BOOL_REFCOUNTS: "1"
         run: pytest -v --capture=sys
 
       - name: Run layout tests with the native Windows platform
-        # Real system font and DPI, with no test font override: catches real overflow.
+        # Offscreen Qt on Windows has no fonts, so the layout tests are skipped above and
+        # run here with the real system font and DPI instead.
         # Runs even if the step above failed, so both results are visible.
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         env:
