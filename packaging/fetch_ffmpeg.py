@@ -10,8 +10,10 @@ The result is a folder laid out the way the packaged app expects::
     <dest>/LICENSE.txt
     <dest>/BUILD_INFO.txt
 
-With ``--source-dest``, the matching FFmpeg source archive is downloaded too, so it
-can be published next to the installer. Only the Python standard library is used.
+With ``--release-dest``, the files that must be published next to the installer for
+LGPL compliance are saved there too: the binary archive, the FFmpeg source, and the
+FFmpeg-Builds recipe at the commit that produced the binaries. Every download is
+checked against the SHA-256 in the manifest. Only the Python standard library is used.
 """
 
 from __future__ import annotations
@@ -69,24 +71,52 @@ def download(url: str, dest: Path) -> None:
     part.replace(dest)
 
 
-def fetch_verified_archive(entry: dict[str, object], cache_dir: Path) -> Path:
-    """Return a cached archive whose SHA-256 matches the manifest, downloading if needed."""
-    url = str(entry["url"])
-    expected = str(entry["sha256"]).lower()
-    archive = cache_dir / PurePosixPath(url).name
-    if archive.is_file() and sha256_of(archive) == expected:
-        print(f"Using cached {archive}")
-        return archive
-    download(url, archive)
-    actual = sha256_of(archive)
+def fetch_verified(url: str, expected_sha256: str, dest: Path) -> Path:
+    """Return ``dest`` holding ``url`` with the expected SHA-256, downloading if needed."""
+    expected = expected_sha256.lower()
+    if dest.is_file() and sha256_of(dest) == expected:
+        print(f"Using cached {dest}")
+        return dest
+    download(url, dest)
+    actual = sha256_of(dest)
     if actual != expected:
-        archive.unlink(missing_ok=True)
+        dest.unlink(missing_ok=True)
         raise SystemExit(
             f"SHA-256 mismatch for {url}\n  expected {expected}\n  actual   {actual}\n"
             "The download is corrupt or the upstream file changed. Do not continue."
         )
     print(f"SHA-256 verified: {actual}")
-    return archive
+    return dest
+
+
+def fetch_verified_archive(entry: dict[str, object], cache_dir: Path) -> Path:
+    """Return the cached binary archive for ``entry``, downloading and verifying it."""
+    url = str(entry["url"])
+    return fetch_verified(url, str(entry["sha256"]), cache_dir / PurePosixPath(url).name)
+
+
+def release_file_names(entry: dict[str, object]) -> dict[str, str]:
+    """Return the names of the FFmpeg files published next to the installer."""
+    return {
+        "binaries": PurePosixPath(str(entry["url"])).name,
+        "source": f"ffmpeg-source-{entry['source_commit']}.tar.gz",
+        "recipe": f"ffmpeg-builds-{entry['build_recipe_commit']}.tar.gz",
+    }
+
+
+def save_release_files(
+    entry: dict[str, object], archive: Path, cache_dir: Path, dest: Path
+) -> None:
+    """Save the binary archive and both verified source archives into ``dest``."""
+    names = release_file_names(entry)
+    dest.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(archive, dest / names["binaries"])
+    for kind in ("source", "recipe"):
+        url_key = "source_url" if kind == "source" else "build_recipe_url"
+        sha_key = "source_sha256" if kind == "source" else "build_recipe_sha256"
+        cached = fetch_verified(str(entry[url_key]), str(entry[sha_key]), cache_dir / names[kind])
+        shutil.copyfile(cached, dest / names[kind])
+        print(f"Saved {dest / names[kind]}")
 
 
 def extract_bundle(archive: Path, archive_root: str, dest: Path) -> None:
@@ -158,13 +188,15 @@ def write_build_info(entry: dict[str, object], archive: Path, dest: Path, versio
     lines = [
         "FFmpeg bundled with Audio from Video",
         "",
-        f"Version:         {entry['version']}",
-        f"License:         {entry['license']}",
-        f"Archive:         {entry['url']}",
-        f"Archive SHA-256: {sha256_of(archive)}",
-        f"Source commit:   {entry['source_commit']}",
-        f"Source archive:  {entry['source_url']}",
-        f"Build recipe:    {entry['build_recipe_url']}",
+        f"Version:          {entry['version']}",
+        f"License:          {entry['license']}",
+        f"Upstream release: {entry['release']}",
+        f"Archive:          {entry['url']}",
+        f"Archive SHA-256:  {sha256_of(archive)}",
+        f"Source commit:    {entry['source_commit']}",
+        f"Source archive:   {entry['source_url']}",
+        f"Recipe commit:    {entry['build_recipe_commit']}",
+        f"Build recipe:     {entry['build_recipe_url']}",
         "",
         "ffmpeg -version:",
         version.rstrip(),
@@ -184,9 +216,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Where downloaded archives are kept between builds.",
     )
     parser.add_argument(
-        "--source-dest",
+        "--release-dest",
         type=Path,
-        help="Also download the matching FFmpeg source archive into this folder.",
+        help="Also save the binary archive and verified source archives into this folder.",
     )
     args = parser.parse_args(argv)
 
@@ -197,12 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     write_build_info(entry, archive, args.dest, version)
     print(f"FFmpeg {entry['version']} staged in {args.dest}")
 
-    if args.source_dest is not None:
-        source_name = f"ffmpeg-source-{entry['source_commit']}.tar.gz"
-        source_path = args.source_dest / source_name
-        if not source_path.is_file():
-            download(str(entry["source_url"]), source_path)
-        print(f"FFmpeg source saved to {source_path}")
+    if args.release_dest is not None:
+        save_release_files(entry, archive, args.cache_dir, args.release_dest)
     return 0
 
 

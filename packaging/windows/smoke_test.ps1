@@ -6,23 +6,31 @@
     Checks that the installed app works with no FFmpeg on PATH, so it must use the
     copy bundled inside the app:
       1. Silent install into a temporary folder.
-      2. "afv --version" and "afv doctor" (doctor must report the bundled FFmpeg).
+      2. "afv --version" and "afv doctor" (doctor must report the bundled FFmpeg,
+         the HTTPS certificate bundle, and the Chinese conversion dictionaries).
       3. Offline extraction of a generated test video to MP3.
       4. The desktop app starts and stays running.
       5. Silent uninstall removes the program files.
 
-    Uses a temporary config.toml, so your own settings are not touched. The
-    desktop app window opens for a few seconds during step 4.
+    Meant for a clean machine such as a CI runner. It refuses to run if Audio from
+    Video is already installed for this user, because the test install would share
+    (and then remove) the real install's uninstall entry and Start menu shortcut.
+    It uses a temporary config.toml, but the desktop app still writes its window
+    preferences and log for the current user, and "afv doctor" creates the cache
+    folder. The desktop app window opens for a few seconds during step 4.
 
 .PARAMETER Installer
     Path to AudioFromVideo-Setup-<version>-x64.exe. Defaults to the newest one in
     build\windows\release\.
 
+.PARAMETER Force
+    Run even though Audio from Video is already installed for this user.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File packaging\windows\smoke_test.ps1
 #>
 [CmdletBinding()]
-param([string]$Installer)
+param([string]$Installer, [switch]$Force)
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
@@ -31,6 +39,11 @@ function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) { throw "FAILED: $Message" }
     Write-Host "  ok: $Message"
+}
+
+$UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{B0615091-F8CB-470E-A6E4-0C4DFC5BECCA}_is1"
+if ((Test-Path $UninstallKey) -and -not $Force) {
+    throw "Audio from Video is already installed for this user. Uninstall it first, or pass -Force to replace that install's uninstall entry and shortcut."
 }
 
 $Repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
@@ -78,6 +91,8 @@ try {
     Write-Host $doctorText
     Assert-True ($doctorExit -eq 0) "afv doctor exit code is 0 (was $doctorExit)"
     Assert-True ($doctorText -match "\(bundled\)") "afv doctor uses the bundled FFmpeg"
+    Assert-True ($doctorText -match "TLS certificates\W+OK") "the HTTPS certificate bundle loads"
+    Assert-True ($doctorText -match "Chinese conversion\W+OK") "the Chinese conversion dictionaries load"
 
     Write-Host "==> 3. Offline extraction"
     $Sample = Join-Path $InputDir "Smoke Test Artist - Smoke Test Song.mp4"

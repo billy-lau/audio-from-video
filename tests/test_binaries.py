@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from audio_from_video import binaries as binaries_mod
 from audio_from_video.binaries import (
     BUNDLED_DIR_ENV_VAR,
     MissingBinaryError,
@@ -135,6 +136,18 @@ def _make_bundled_layout(root: Path) -> Path:
     return bin_dir
 
 
+@pytest.fixture
+def runnable_unless(monkeypatch: pytest.MonkeyPatch) -> set[str]:
+    """Stub the bundled-binary start check; file names added to the set fail to start."""
+    broken: set[str] = set()
+
+    def _fake_version(path: Path) -> str | None:
+        return None if Path(path).name in broken else f"{Path(path).stem} version test"
+
+    monkeypatch.setattr(binaries_mod, "get_binary_version", _fake_version)
+    return broken
+
+
 def test_bundled_binary_dir_frozen_and_dev_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -150,9 +163,11 @@ def test_bundled_binary_dir_frozen_and_dev_override(
     monkeypatch.setattr(sys, "executable", str(app_dir / "Audio from Video.exe"))
     assert bundled_binary_dir(env={}) == bin_dir.resolve()
 
-    # Frozen app whose ffmpeg folder was removed: None.
-    monkeypatch.setattr(sys, "executable", str(tmp_path / "elsewhere" / "app.exe"))
-    assert bundled_binary_dir(env={}) is None
+    # A frozen app still expects the folder after it was removed, so the loss is reported.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.setattr(sys, "executable", str(elsewhere / "app.exe"))
+    assert bundled_binary_dir(env={}) == elsewhere.resolve() / "ffmpeg" / "bin"
 
     # Developer override works without freezing, and is ignored when it does not exist.
     monkeypatch.delattr(sys, "frozen", raising=False)
@@ -160,7 +175,9 @@ def test_bundled_binary_dir_frozen_and_dev_override(
     assert bundled_binary_dir(env={BUNDLED_DIR_ENV_VAR: str(tmp_path / "nope")}) is None
 
 
-def test_bundled_precedence_between_config_and_path(tmp_path: Path) -> None:
+def test_bundled_precedence_between_config_and_path(
+    tmp_path: Path, runnable_unless: set[str]
+) -> None:
     ext = ".cmd" if sys.platform == "win32" else ""
     bin_dir = _make_bundled_layout(tmp_path / "app")
     path_dir = tmp_path / "path_bin"
@@ -197,11 +214,13 @@ def test_bundled_precedence_between_config_and_path(tmp_path: Path) -> None:
 
 
 def test_damaged_bundled_copy_falls_back_to_path_then_reports_reinstall(
-    tmp_path: Path,
+    tmp_path: Path, runnable_unless: set[str]
 ) -> None:
     ext = ".cmd" if sys.platform == "win32" else ""
-    bin_dir = tmp_path / "app" / "ffmpeg" / "bin"
-    bin_dir.mkdir(parents=True)  # Folder exists, but both binaries are missing.
+    bin_ext = ".exe" if sys.platform == "win32" else ""
+    bin_dir = _make_bundled_layout(tmp_path / "app")
+    (bin_dir / f"ffprobe{bin_ext}").unlink()  # Missing.
+    runnable_unless.add(f"ffmpeg{bin_ext}")  # Present but cannot start.
     path_dir = tmp_path / "path_bin"
     path_dir.mkdir()
     _make_fake_exe(path_dir / f"ffmpeg{ext}")
@@ -211,23 +230,45 @@ def test_damaged_bundled_copy_falls_back_to_path_then_reports_reinstall(
         env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
     ffmpeg_res, ffprobe_res = inspect_binaries(config=AppConfig(), env=env)
 
-    # ffmpeg falls through to PATH.
+    # A bundled ffmpeg that cannot start falls through to PATH.
     assert ffmpeg_res.found and ffmpeg_res.source == "PATH"
     # ffprobe is nowhere: the error points at the damaged bundled copy.
     assert not ffprobe_res.found
     assert ffprobe_res.source == "bundled"
+    assert "is missing" in (ffprobe_res.error or "")
     assert "Reinstall the app" in (ffprobe_res.error or "")
+
+    # With no PATH copy either, the unstartable ffmpeg is reported as damaged too, and the
+    # error says to reinstall without the "install FFmpeg with winget" advice.
+    ffmpeg_res, _ = inspect_binaries(config=AppConfig(), env={**env, "PATH": ""})
+    assert not ffmpeg_res.found and ffmpeg_res.source == "bundled"
+    assert "cannot start" in (ffmpeg_res.error or "")
+    with pytest.raises(MissingBinaryError) as exc_info:
+        resolve_binaries(config=AppConfig(), env={**env, "PATH": ""}, platform_name="win32")
+    message = str(exc_info.value)
+    assert "Reinstall the app" in message
+    assert "winget" not in message
+
+
+def test_frozen_app_missing_ffmpeg_folder_says_reinstall(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "Audio from Video.exe"))
+    ffmpeg_res, ffprobe_res = inspect_binaries(config=AppConfig(), env={"PATH": ""})
+    for res in (ffmpeg_res, ffprobe_res):
+        assert not res.found and res.source == "bundled"
+        assert "Reinstall the app" in (res.error or "")
 
 
 def test_bundled_lookup_uses_exe_names_on_windows(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runnable_unless: set[str]
 ) -> None:
     bin_dir = tmp_path / "ffmpeg" / "bin"
     bin_dir.mkdir(parents=True)
     (bin_dir / "ffmpeg.exe").write_bytes(b"MZ")
     (bin_dir / "ffprobe.exe").write_bytes(b"MZ")
     monkeypatch.setattr(sys, "platform", "win32")
-    monkeypatch.setattr(os, "access", lambda *_args, **_kwargs: True)
 
     ffmpeg_res, ffprobe_res = inspect_binaries(
         config=AppConfig(), env={"PATH": "", BUNDLED_DIR_ENV_VAR: str(bin_dir)}

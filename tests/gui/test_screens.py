@@ -1115,8 +1115,8 @@ def test_summary_screen_counts_banners_folders_and_error_copy(
     )
     screen.open_output_button.click()
     screen.open_containing_button.click()
-    assert opened_urls[0].toLocalFile() == str(out_root)
-    assert opened_urls[1].toLocalFile() == str(unmatched_dir)
+    assert Path(opened_urls[0].toLocalFile()) == out_root
+    assert Path(opened_urls[1].toLocalFile()) == unmatched_dir
 
     # Save report invokes controller.save_report.
     report_path = tmp_path / "report.json"
@@ -1611,7 +1611,7 @@ def test_summary_screen_non_interrupted_and_clear_error(
         staticmethod(lambda url: opened.append(url) or True),
     )
     screen.open_containing_button.click()
-    assert opened[-1].toLocalFile() == str(out_root)
+    assert Path(opened[-1].toLocalFile()) == out_root
 
     ctrl.error.emit("Title", "Details")
     assert not screen.error_panel.isHidden()

@@ -23,21 +23,22 @@ BUNDLED_DIR_ENV_VAR = "AFV_BUNDLED_FFMPEG_DIR"
 
 
 def bundled_binary_dir(env: Mapping[str, str] | None = None) -> Path | None:
-    """Return the private FFmpeg ``bin`` folder shipped with a packaged app, if any.
+    """Return the private FFmpeg ``bin`` folder a packaged app is expected to have.
 
-    A frozen build (PyInstaller sets ``sys.frozen``) looks for ``ffmpeg/bin`` next to
-    its executable. When running from source, ``AFV_BUNDLED_FFMPEG_DIR`` can point at
-    an equivalent folder for local testing. Returns ``None`` when no such folder exists.
+    A frozen build (PyInstaller sets ``sys.frozen``) always expects ``ffmpeg/bin`` next
+    to its executable, even if the folder has gone missing, so a damaged install is
+    reported as such. When running from source, ``AFV_BUNDLED_FFMPEG_DIR`` can point at
+    an equivalent folder for local testing; it is ignored if it does not exist.
+    Returns ``None`` when the app has no bundled copy.
     """
     active_env = os.environ if env is None else env
     override = active_env.get(BUNDLED_DIR_ENV_VAR, "").strip()
     if override:
         candidate = Path(override).expanduser()
-    elif getattr(sys, "frozen", False):
-        candidate = Path(sys.executable).resolve().parent / "ffmpeg" / "bin"
-    else:
-        return None
-    return candidate if candidate.is_dir() else None
+        return candidate if candidate.is_dir() else None
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "ffmpeg" / "bin"
+    return None
 
 
 def _bundled_candidate(name: str, bundled_dir: Path) -> Path:
@@ -85,12 +86,16 @@ def _resolve_single_binary(
         return _validate_explicit_path(name, config_override.strip(), source="config.toml")
 
     bundled_dir = bundled_binary_dir(env)
+    bundled_problem = ""
     if bundled_dir is not None:
-        bundled = _validate_explicit_path(
-            name, str(_bundled_candidate(name, bundled_dir)), source="bundled"
-        )
-        if bundled.found:
-            return bundled
+        candidate = _bundled_candidate(name, bundled_dir)
+        if not candidate.is_file():
+            bundled_problem = "is missing"
+        elif get_binary_version(candidate) is None:
+            # Present but unable to start, e.g. antivirus removed one of its DLLs.
+            bundled_problem = "cannot start"
+        else:
+            return BinaryResolution(name=name, path=candidate.resolve(), source="bundled")
 
     found = shutil.which(name, path=env.get("PATH"))
     if found:
@@ -103,7 +108,7 @@ def _resolve_single_binary(
             path=None,
             source="bundled",
             error=(
-                f"The {name} bundled with the app is missing or damaged "
+                f"The {name} bundled with the app {bundled_problem} "
                 f"({_bundled_candidate(name, bundled_dir)}). Reinstall the app to restore it."
             ),
         )
@@ -176,11 +181,14 @@ def resolve_binaries(
 ) -> ResolvedBinaries:
     """Resolve both ffmpeg and ffprobe, raising MissingBinaryError with install guidance."""
     ffmpeg_res, ffprobe_res = inspect_binaries(config=config, env=env)
-    errors = [res.error for res in (ffmpeg_res, ffprobe_res) if not res.found and res.error]
-    if errors:
-        guidance = format_install_instructions(platform_name=platform_name)
-        joined = "\n".join(f"  - {err}" for err in errors)
-        raise MissingBinaryError(f"Required FFmpeg binaries are missing:\n{joined}\n\n{guidance}")
+    failed = [res for res in (ffmpeg_res, ffprobe_res) if not res.found and res.error]
+    if failed:
+        joined = "\n".join(f"  - {res.error}" for res in failed)
+        message = f"Required FFmpeg binaries are missing:\n{joined}"
+        if any(res.source != "bundled" for res in failed):
+            # A packaged app needs reinstalling, not a separate FFmpeg install.
+            message += f"\n\n{format_install_instructions(platform_name=platform_name)}"
+        raise MissingBinaryError(message)
     assert ffmpeg_res.path is not None and ffprobe_res.path is not None
     return ResolvedBinaries(ffmpeg=ffmpeg_res.path, ffprobe=ffprobe_res.path)
 

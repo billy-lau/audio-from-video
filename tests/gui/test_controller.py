@@ -7,6 +7,7 @@ import inspect
 import logging
 import threading
 import time
+import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import FunctionType
@@ -908,7 +909,8 @@ def test_set_ffmpeg_path_saves_and_rechecks_binaries_on_worker(
         ctrl.set_ffmpeg_path(fake_ffmpeg)
     assert sig.args == [ControllerState.INPUTS]
     assert ctrl.state == ControllerState.INPUTS
-    assert f'ffmpeg = "{fake_ffmpeg}"' in cfg_path.read_text(encoding="utf-8")
+    saved = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+    assert saved["binaries"]["ffmpeg"] == str(fake_ffmpeg)
     assert all(tid != ui_ident for tid in inspect_threads)
 
 

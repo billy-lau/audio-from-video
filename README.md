@@ -475,14 +475,23 @@ uploads `AudioFromVideo-Setup-<version>-x64.exe` as a workflow artifact.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
-powershell -ExecutionPolicy Bypass -File packaging\windows\smoke_test.ps1   # optional
 ```
 
-The installer and its release files land in `build\windows\release\`. The FFmpeg build is
-pinned by URL and SHA-256 in [`packaging/ffmpeg-manifest.toml`](packaging/ffmpeg-manifest.toml)
-(an LGPL build that includes the `libmp3lame` MP3 encoder). The build also writes license
-notices into the app's `licenses\` folder and saves the matching FFmpeg and app source
-archives next to the installer.
+The installer and its release files land in `build\windows\release\`. To repeat a build with
+the exact same Python packages, pass the `pip-freeze.txt` from an earlier build with
+`-Constraints`. The smoke test (`packaging\windows\smoke_test.ps1`) is meant for a clean
+machine: it refuses to run where the app is already installed, because its test install would
+share and then remove that install's uninstall entry and Start menu shortcut.
+
+The FFmpeg build is pinned by URL and SHA-256 in
+[`packaging/ffmpeg-manifest.toml`](packaging/ffmpeg-manifest.toml): an LGPL build that includes
+the `libmp3lame` MP3 encoder, taken from a month-end upstream release (kept for two years). The
+build writes license notices into the app's `licenses\` folder and saves the source code that
+the licenses call for next to the installer: this app at the exact commit, FFmpeg, the
+FFmpeg-Builds scripts that compiled it, the FFmpeg binary archive, and mutagen.
+
+The installed app includes the command-line tool too, without adding it to `PATH`:
+`%LOCALAPPDATA%\Programs\Audio from Video\afv.exe`.
 
 Builds are not code-signed yet. On first launch, Windows SmartScreen shows "Windows protected
 your PC"; choose **More info**, then **Run anyway**.

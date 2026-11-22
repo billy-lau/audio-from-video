@@ -2,25 +2,39 @@
 #
 # Each table is one (OS, architecture) target. packaging/fetch_ffmpeg.py downloads
 # `url`, refuses to continue unless the SHA-256 matches `sha256`, and copies the
-# `bin/` folder and license into the app bundle.
+# `bin/` folder and license into the app bundle. Release builds also save, next to
+# the installer, the binary archive itself plus two checksum-verified source
+# archives: the FFmpeg source (`source_url`) and the FFmpeg-Builds recipe at the
+# exact commit that produced the binaries (`build_recipe_url`). The recipe contains
+# the build scripts, configure flags, and pinned versions of every library compiled
+# into FFmpeg, including libmp3lame.
 #
 # To update a pin:
-#   1. Pick a release at https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases
-#      (use a dated `autobuild-...` tag, never `latest`, so the URL stays stable).
+#   1. Pick the LAST build of a month at
+#      https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases
+#      Upstream keeps month-end builds for two years but deletes other daily
+#      builds after 14 days, so never pin a mid-month build (or `latest`).
 #   2. Use the LGPL *shared* variant (no GPL codecs; ffmpeg.exe and ffprobe.exe
 #      share one set of DLLs).
-#   3. Copy the asset URL and its SHA-256 (from checksums.sha256 or the asset page),
-#      and update `version`, `archive_root`, `source_commit`, and `build_recipe_url`.
+#   3. Copy the asset URL and its SHA-256 from the release page.
+#   4. Get the release tag's commit (gh api repos/FFmpeg-Builds/FFmpeg-Builds/git/ref/tags/<tag>)
+#      for `build_recipe_commit`, and the full FFmpeg commit named in the asset
+#      (the part after "-g") for `source_commit`.
+#   5. Download both source archives and record their SHA-256 values.
 
 [windows-x64]
-version = "n9.0.2-61-gd59078794d"
+version = "n9.0.2-39-g7adfbe40dc"
 license = "LGPL-3.0-or-later"
-url = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-21-12-37/ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-shared-9.0.zip"
-sha256 = "499fa5e468f9ea6a4d38647f81f9ca4a9ac33655f30faf54b7a800ca9f4d6e5f"
-archive_root = "ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-shared-9.0"
+release = "autobuild-2026-10-31-12-59"
+url = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-10-31-12-59/ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-shared-9.0.zip"
+sha256 = "e907b01fa4783913151237e37df2a10fa97d99a1598a021bf59d4ae62ffed4c0"
+archive_root = "ffmpeg-n9.0.2-39-g7adfbe40dc-win64-lgpl-shared-9.0"
 executables = ["ffmpeg.exe", "ffprobe.exe"]
-# FFmpeg source for this exact build (bundled next to the installer for LGPL compliance).
-source_commit = "d59078794d80f5256d5def27e10bb5400a13195c"
-source_url = "https://github.com/FFmpeg/FFmpeg/archive/d59078794d80f5256d5def27e10bb5400a13195c.tar.gz"
-# Build scripts, configure flags, and pinned versions of the third-party libraries.
-build_recipe_url = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-11-21-12-37"
+# FFmpeg source for this exact build.
+source_commit = "7adfbe40dcde598f93a6963d2f7b22cd75202ccc"
+source_url = "https://github.com/FFmpeg/FFmpeg/archive/7adfbe40dcde598f93a6963d2f7b22cd75202ccc.tar.gz"
+source_sha256 = "4babda050dcfccb1194dd2a9e75b5e5ec1aa33b3e99d4f6a7106b6337b6b4a0c"
+# FFmpeg-Builds scripts at the commit the release tag points to.
+build_recipe_commit = "5031c6f1082414e53688d39e521849905071070d"
+build_recipe_url = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/archive/5031c6f1082414e53688d39e521849905071070d.tar.gz"
+build_recipe_sha256 = "3d82bbb1dd436116034bb4d945245e5550dff0d89db0094e9af90382527c2c17"

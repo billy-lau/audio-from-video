@@ -64,12 +64,14 @@ def test_save_settings_round_trip_all_editable_keys(tmp_path: Path) -> None:
         config_path=cfg_path,
     )
     assert saved == cfg_path
+    # Path values are stored in native form (backslashes on Windows); strings verbatim.
+    native_ffmpeg = str(Path("/opt/custom/ffmpeg"))
     loaded = load_config(config_path=cfg_path, env={})
-    assert loaded.binaries.ffmpeg_path == "/opt/custom/ffmpeg"
+    assert loaded.binaries.ffmpeg_path == native_ffmpeg
     assert loaded.binaries.ffprobe_path == "/opt/custom/ffprobe"
     assert loaded.audio.quality == "v2"
     assert loaded.audio.copy_mp3 is False
-    assert loaded.output.output_dir == "/var/music/out"
+    assert loaded.output.output_dir == str(Path("/var/music/out"))
     assert loaded.output.flat is True
     assert loaded.output.on_conflict == ConflictPolicy.OVERWRITE
     assert loaded.execution.jobs == 6
@@ -88,7 +90,7 @@ def test_save_settings_round_trip_all_editable_keys(tmp_path: Path) -> None:
         config_path=cfg_path,
     )
     raw = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
-    assert raw["binaries"] == {"ffmpeg": "/opt/custom/ffmpeg", "ffprobe": "/opt/custom/ffprobe"}
+    assert raw["binaries"] == {"ffmpeg": native_ffmpeg, "ffprobe": "/opt/custom/ffprobe"}
     loaded2 = load_config(config_path=cfg_path, env={})
     assert loaded2.audio.quality == "192k"
     assert loaded2.audio.copy_mp3 is True

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 import sys
 import tempfile
 from collections.abc import Mapping
@@ -38,11 +39,20 @@ class DoctorReport:
     mb_contact_ok: bool
     cache_writable: bool
     messages: list[str]
+    tls_ok: bool = True
+    chinese_ok: bool = True
 
     @property
     def required_ok(self) -> bool:
         """Return True when all hard local runtime requirements pass."""
-        return self.ffmpeg_ok and self.ffprobe_ok and self.lame_ok and self.cache_writable
+        return (
+            self.ffmpeg_ok
+            and self.ffprobe_ok
+            and self.lame_ok
+            and self.cache_writable
+            and self.tls_ok
+            and self.chinese_ok
+        )
 
 
 def _check_cache_writable(cache_dir: Path) -> tuple[bool, str]:
@@ -53,6 +63,34 @@ def _check_cache_writable(cache_dir: Path) -> tuple[bool, str]:
         return True, f"writable ({cache_dir})"
     except OSError as exc:
         return False, f"not writable ({cache_dir}): {exc}"
+
+
+def _check_tls_certificates() -> tuple[bool, str]:
+    """Load the CA bundle that HTTPS lookups use (a packaged app must ship it)."""
+    try:
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+        count = len(context.get_ca_certs())
+    except (ImportError, OSError, ssl.SSLError) as exc:
+        return False, f"cannot load CA certificates: {exc}"
+    if not count:
+        return False, "the CA certificate bundle is empty"
+    return True, f"{count} CA certificates loaded"
+
+
+def _check_chinese_conversion() -> tuple[bool, str]:
+    """Convert a sample string with the bundled OpenCC dictionaries."""
+    from audio_from_video.formatting import to_simplified_chinese
+
+    sample, expected = "後來", "后来"
+    try:
+        result = to_simplified_chinese(sample)
+    except Exception as exc:  # Any failure means the dictionaries are broken.
+        return False, f"conversion failed: {exc}"
+    if result != expected:
+        return False, f"unexpected result {result!r} for {sample!r}"
+    return True, "Traditional to Simplified dictionaries available"
 
 
 def run_doctor(
@@ -133,12 +171,30 @@ def run_doctor(
     if not cache_ok:
         messages.append(cache_detail)
 
+    tls_ok, tls_detail = _check_tls_certificates()
+    table.add_row(
+        "TLS certificates", "[green]OK[/green]" if tls_ok else "[red]ERROR[/red]", tls_detail
+    )
+    if not tls_ok:
+        messages.append(tls_detail)
+
+    chinese_ok, chinese_detail = _check_chinese_conversion()
+    table.add_row(
+        "Chinese conversion",
+        "[green]OK[/green]" if chinese_ok else "[red]ERROR[/red]",
+        escape(chinese_detail),
+    )
+    if not chinese_ok:
+        messages.append(chinese_detail)
+
     cfg_status = "exists" if config.config_path.is_file() else "not created yet; using defaults"
     table.add_row("Config file", "[green]OK[/green]", f"{config.config_path} ({cfg_status})")
 
     console.print(table)
 
-    if not (ffmpeg_res.found and ffprobe_res.found):
+    failed = [res for res in (ffmpeg_res, ffprobe_res) if not res.found]
+    if any(res.source != "bundled" for res in failed):
+        # A damaged bundled copy needs a reinstall, which its error already says.
         console.print()
         console.print(escape(format_install_instructions(platform_name=platform_name)))
 
@@ -149,4 +205,6 @@ def run_doctor(
         mb_contact_ok=mb_ok,
         cache_writable=cache_ok,
         messages=messages,
+        tls_ok=tls_ok,
+        chinese_ok=chinese_ok,
     )

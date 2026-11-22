@@ -12,6 +12,9 @@ Writes into ``--out``:
 * ``SOURCE_OFFER.txt``: where to get the source code for GPL and LGPL components.
 * ``LICENSE.txt``: this project's own MIT license.
 
+With ``--sdist-dest``, the exact PyPI source distributions of bundled GPL Python
+packages (mutagen) are saved there too, checked against PyPI's SHA-256.
+
 The Python package list is the runtime dependency closure of
 ``audio-from-video[gui]`` as installed in the running environment, so build tools
 such as PyInstaller are not listed as bundled components.
@@ -34,6 +37,8 @@ ROOT_EXTRAS = ("gui",)
 LICENSES_DIR = Path(__file__).resolve().parent / "licenses"
 _LICENSE_FILE_RE = re.compile(r"^(LICEN[CS]E|COPYING|NOTICE|AUTHORS)", re.IGNORECASE)
 _RULE = "=" * 78
+# GPL-licensed Python packages whose exact source is published next to the installer.
+_GPL_SOURCE_DISTS = {"mutagen"}
 
 # Qt for Python wheels carry no license files; they are offered under these terms.
 _QT_DISTS = {"pyside6-essentials", "shiboken6"}
@@ -131,7 +136,31 @@ def _python_license_text() -> str:
     return "See https://docs.python.org/3/license.html"
 
 
-def write_notices(out: Path, ffmpeg_dir: Path, commit: str) -> None:
+def save_gpl_sdists(components: list[Component], dest: Path) -> None:
+    """Save the exact PyPI source distribution of each bundled GPL Python package."""
+    import hashlib
+    import json
+    import urllib.request
+
+    dest.mkdir(parents=True, exist_ok=True)
+    for comp in components:
+        if canonicalize_name(comp.name) not in _GPL_SOURCE_DISTS:
+            continue
+        api = f"https://pypi.org/pypi/{comp.name}/{comp.version}/json"
+        with urllib.request.urlopen(api, timeout=60) as response:
+            files = json.load(response)["urls"]
+        sdist = next((f for f in files if f["packagetype"] == "sdist"), None)
+        if sdist is None:
+            raise SystemExit(f"No source distribution on PyPI for {comp.name} {comp.version}")
+        with urllib.request.urlopen(sdist["url"], timeout=120) as response:
+            data = response.read()
+        if hashlib.sha256(data).hexdigest() != sdist["digests"]["sha256"]:
+            raise SystemExit(f"SHA-256 mismatch for {sdist['filename']}")
+        (dest / sdist["filename"]).write_bytes(data)
+        print(f"Saved {dest / sdist['filename']}")
+
+
+def write_notices(out: Path, ffmpeg_dir: Path, commit: str, sdist_dest: Path | None) -> None:
     components = runtime_closure()
     out.mkdir(parents=True, exist_ok=True)
     project = next(c for c in components if canonicalize_name(c.name) == ROOT_DIST)
@@ -157,10 +186,11 @@ def write_notices(out: Path, ffmpeg_dir: Path, commit: str) -> None:
         "licenses\\THIRD_PARTY_NOTICES.txt inside the installation folder, and",
         "licenses\\SOURCE_OFFER.txt explains how to get the source code.",
         "",
-        "Because the bundle includes GPL-licensed code (mutagen), the application as",
-        "distributed in this installer is provided under the terms of the GNU",
-        "General Public License, version 2 or later. Audio from Video's own source",
-        "code remains available under the MIT License.",
+        "Because the bundle combines GPL-2.0-or-later code (mutagen) with LGPL-3.0",
+        "(Qt for Python and FFmpeg) and Apache-2.0 (opencc-python-reimplemented)",
+        "components, the application as distributed in this installer is provided",
+        "under the terms of the GNU General Public License, version 3 or later.",
+        "Audio from Video's own source code remains available under the MIT License.",
         "",
         *(f"  {name.ljust(width)}{lic}" for name, lic in rows),
         "",
@@ -210,27 +240,38 @@ def write_notices(out: Path, ffmpeg_dir: Path, commit: str) -> None:
     (out / "THIRD_PARTY_NOTICES.txt").write_text("\n".join(parts), encoding="utf-8")
 
     # SOURCE_OFFER.txt: where to get corresponding source code.
+    def info(label: str) -> str:
+        found = re.search(rf"^{label}:\s*(\S+)", ffmpeg_info, flags=re.MULTILINE)
+        return found.group(1) if found else "(unknown)"
+
     qt = next((c for c in components if canonicalize_name(c.name) == "pyside6-essentials"), None)
+    mutagen = next((c for c in components if canonicalize_name(c.name) == "mutagen"), None)
     qt_version = qt.version if qt else "the bundled version"
-    source_commit = re.search(r"Source commit:\s*(\S+)", ffmpeg_info)
-    source_url = re.search(r"Source archive:\s*(\S+)", ffmpeg_info)
-    recipe_url = re.search(r"Build recipe:\s*(\S+)", ffmpeg_info)
+    archive_name = info("Archive").rsplit("/", 1)[-1]
     offer = [
         "Source code for Audio from Video and its GPL and LGPL components",
         "",
-        "Each release of this installer is published together with:",
-        f"  * audio-from-video-src-{commit}.zip  (this application, exact commit {commit})",
-        (
-            f"  * ffmpeg-source-{source_commit.group(1)}.tar.gz  (FFmpeg, exact source)"
-            if source_commit
-            else "  * the FFmpeg source archive"
-        ),
+        "Each release of this installer is published together with these files:",
+        f"  * audio-from-video-src-{commit}.zip",
+        f"      this application, exact commit {commit}",
+        f"  * ffmpeg-source-{info('Source commit')}.tar.gz",
+        "      FFmpeg, exact source of the bundled build",
+        f"  * ffmpeg-builds-{info('Recipe commit')}.tar.gz",
+        "      FFmpeg-Builds scripts that produced the bundled FFmpeg: configure flags",
+        "      and pinned versions of every library compiled in, including libmp3lame",
+        f"  * {archive_name}",
+        "      the unmodified FFmpeg binary archive that was bundled",
+    ]
+    if mutagen is not None:
+        offer += [
+            f"  * mutagen-{mutagen.version}.tar.gz",
+            "      mutagen (GPL-2.0-or-later), exact source distribution",
+        ]
+    offer += [
         "",
         "Upstream locations:",
-        f"  * FFmpeg source:        {source_url.group(1) if source_url else 'https://ffmpeg.org/download.html'}",
-        f"  * FFmpeg build recipe:  {recipe_url.group(1) if recipe_url else 'https://github.com/FFmpeg-Builds/FFmpeg-Builds'}",
-        "    (build scripts, configure flags, and pinned versions of the libraries",
-        "     compiled into FFmpeg, including libmp3lame)",
+        f"  * FFmpeg source:        {info('Source archive')}",
+        f"  * FFmpeg build recipe:  {info('Build recipe')}",
         f"  * Qt for Python {qt_version}: https://download.qt.io/official_releases/QtForPython/",
         "  * Qt libraries:         https://download.qt.io/official_releases/qt/",
         "  * mutagen:              https://github.com/quodlibet/mutagen",
@@ -241,6 +282,8 @@ def write_notices(out: Path, ffmpeg_dir: Path, commit: str) -> None:
     ]
     (out / "SOURCE_OFFER.txt").write_text("\n".join(offer), encoding="utf-8")
     print(f"Wrote license notices for {len(components)} Python packages to {out}")
+    if sdist_dest is not None:
+        save_gpl_sdists(components, sdist_dest)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -248,8 +291,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, type=Path, help="Output licenses folder.")
     parser.add_argument("--ffmpeg-dir", required=True, type=Path, help="Staged FFmpeg folder.")
     parser.add_argument("--commit", required=True, help="Git commit the build was made from.")
+    parser.add_argument(
+        "--sdist-dest",
+        type=Path,
+        help="Also save the exact source distributions of bundled GPL packages here.",
+    )
     args = parser.parse_args(argv)
-    write_notices(args.out, args.ffmpeg_dir, args.commit)
+    write_notices(args.out, args.ffmpeg_dir, args.commit, args.sdist_dest)
     return 0
 
 

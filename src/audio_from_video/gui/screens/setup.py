@@ -587,8 +587,11 @@ class SetupScreen(QWidget):
         else:
             self._set_chip(self._ffmpeg_badge, "Action needed", "error")
         # Keep install_instructions populated for programmatic inspection, but tuck it
-        # away visually once FFmpeg, FFprobe, and libmp3lame are all verified ready.
-        self._instructions_container.setVisible(not all_ready)
+        # away visually once FFmpeg, FFprobe, and libmp3lame are all verified ready, or
+        # when only the app's own bundled copy is damaged (the error says to reinstall).
+        failed = [res for res in (ffmpeg, ffprobe) if not res.found]
+        bundled_only = bool(failed) and all(res.source == "bundled" for res in failed)
+        self._instructions_container.setVisible(not all_ready and not bundled_only)
 
     @Slot(str)
     def _on_setup_error(self, message: str) -> None:

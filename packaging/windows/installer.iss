@@ -32,6 +32,12 @@ AppPublisher=Audio from Video
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
+; Always install to the default per-user folder, so [InstallDelete] below can never
+; remove an unrelated "ffmpeg" or "licenses" folder from a user-chosen location.
+DisableDirPage=yes
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoDescription={#AppName} Setup
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

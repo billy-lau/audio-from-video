@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import calendar
 import hashlib
 import importlib.util
 import re
@@ -53,9 +54,13 @@ def _entry(url: str, sha256: str) -> dict[str, object]:
         "sha256": sha256,
         "archive_root": ROOT,
         "executables": ["ffmpeg.exe", "ffprobe.exe"],
+        "release": "autobuild-2000-01-31-00-00",
         "source_commit": "0" * 40,
         "source_url": "https://example.invalid/src.tar.gz",
-        "build_recipe_url": "https://example.invalid/recipe",
+        "source_sha256": "0" * 64,
+        "build_recipe_commit": "1" * 40,
+        "build_recipe_url": "https://example.invalid/recipe.tar.gz",
+        "build_recipe_sha256": "0" * 64,
     }
 
 
@@ -68,7 +73,20 @@ def test_windows_manifest_entry_is_pinned_lgpl_shared_build() -> None:
     assert "lgpl-shared" in url and "gpl-shared" not in url.replace("lgpl-shared", "")
     assert url.endswith(f"/{entry['archive_root']}.zip")
     assert entry["executables"] == ["ffmpeg.exe", "ffprobe.exe"]
-    assert str(entry["source_commit"]) in str(entry["source_url"])
+    assert str(entry["release"]) in url
+    # Month-end builds are kept upstream for two years; other daily builds for 14 days.
+    match = re.fullmatch(r"autobuild-(\d{4})-(\d{2})-(\d{2})-\d{2}-\d{2}", str(entry["release"]))
+    assert match, entry["release"]
+    year, month, day = map(int, match.groups())
+    assert day == calendar.monthrange(year, month)[1], "pin the last build of a month"
+    # Both source archives are pinned by commit and checksum.
+    for commit_key, url_key, sha_key in (
+        ("source_commit", "source_url", "source_sha256"),
+        ("build_recipe_commit", "build_recipe_url", "build_recipe_sha256"),
+    ):
+        assert re.fullmatch(r"[0-9a-f]{40}", str(entry[commit_key]))
+        assert str(entry[url_key]).endswith(f"/{entry[commit_key]}.tar.gz")
+        assert re.fullmatch(r"[0-9a-f]{64}", str(entry[sha_key]))
     with pytest.raises(SystemExit, match="Unknown target"):
         fetch_ffmpeg.load_target("windows-sparc")
 
@@ -128,3 +146,41 @@ def test_fetch_verified_archive_enforces_sha256_and_reuses_cache(tmp_path: Path)
     assert first.read_bytes() == upstream.read_bytes()
     upstream.unlink()
     assert fetch_ffmpeg.fetch_verified_archive(entry, cache) == first
+
+
+def test_save_release_files_verifies_and_names_every_archive(tmp_path: Path) -> None:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    binaries = _make_archive(upstream / "ff.zip")
+    source = upstream / "src.tar.gz"
+    source.write_bytes(b"ffmpeg source")
+    recipe = upstream / "recipe.tar.gz"
+    recipe.write_bytes(b"build scripts")
+
+    def sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    entry = {
+        **_entry(binaries.as_uri(), sha(binaries)),
+        "source_url": source.as_uri(),
+        "source_sha256": sha(source),
+        "build_recipe_url": recipe.as_uri(),
+        "build_recipe_sha256": sha(recipe),
+    }
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    release = tmp_path / "release"
+    archive = fetch_ffmpeg.fetch_verified_archive(entry, cache)
+    fetch_ffmpeg.save_release_files(entry, archive, cache, release)
+
+    names = fetch_ffmpeg.release_file_names(entry)
+    assert sorted(p.name for p in release.iterdir()) == sorted(names.values())
+    assert names["source"] == f"ffmpeg-source-{'0' * 40}.tar.gz"
+    assert names["recipe"] == f"ffmpeg-builds-{'1' * 40}.tar.gz"
+    assert (release / names["recipe"]).read_bytes() == b"build scripts"
+
+    # A source archive whose checksum changed upstream stops the build.
+    recipe.write_bytes(b"tampered")
+    (cache / names["recipe"]).unlink()
+    with pytest.raises(SystemExit, match="SHA-256 mismatch"):
+        fetch_ffmpeg.save_release_files(entry, archive, cache, tmp_path / "release2")

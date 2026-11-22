@@ -16,6 +16,10 @@
     Python launcher used to create the build environment, for example "python"
     or "py -3.13". Defaults to "python".
 
+.PARAMETER Constraints
+    Optional pip constraints file that pins exact dependency versions, for a
+    reproducible build (for example, the pip-freeze.txt saved by an earlier build).
+
 .PARAMETER Clean
     Delete build\windows\ (except the download cache) before building.
 
@@ -28,6 +32,7 @@
 [CmdletBinding()]
 param(
     [string]$Python = "python",
+    [string]$Constraints,
     [switch]$Clean,
     [switch]$SkipInstaller
 )
@@ -88,7 +93,9 @@ Invoke-Checked $Py @("-c", "import sys, struct; assert sys.version_info >= (3, 1
 
 Write-Host "==> Installing the app and PyInstaller into the build environment"
 Invoke-Checked $Py @("-m", "pip", "install", "--quiet", "--upgrade", "pip")
-Invoke-Checked $Py @("-m", "pip", "install", "--quiet", "$($Repo)[gui]", "pyinstaller==6.22.3")
+$pipArgs = @("-m", "pip", "install", "--quiet", "$($Repo)[gui]", "pyinstaller==6.22.3")
+if ($Constraints) { $pipArgs += @("--constraint", (Resolve-Path $Constraints).Path) }
+Invoke-Checked $Py $pipArgs
 # Always reinstall the app itself so the build picks up local source changes.
 Invoke-Checked $Py @("-m", "pip", "install", "--quiet", "--no-deps", "--force-reinstall", $Repo)
 
@@ -105,7 +112,7 @@ Write-Host "==> Building Audio from Video $Version (commit $Commit$(if ($Dirty) 
 Write-Host "==> Fetching and verifying FFmpeg"
 Invoke-Checked $Py @(
     "packaging\fetch_ffmpeg.py", "--target", "windows-x64",
-    "--dest", $FFmpegStage, "--cache-dir", $Cache, "--source-dest", $Release
+    "--dest", $FFmpegStage, "--cache-dir", $Cache, "--release-dest", $Release
 )
 
 # --- 3. Freeze the app -------------------------------------------------------
@@ -124,8 +131,12 @@ Write-Host "==> Adding FFmpeg and license notices to the app folder"
 Copy-Item -Recurse -Force $FFmpegStage (Join-Path $App "ffmpeg")
 Invoke-Checked $Py @(
     "packaging\gen_notices.py", "--out", (Join-Path $App "licenses"),
-    "--ffmpeg-dir", $FFmpegStage, "--commit", $Commit
+    "--ffmpeg-dir", $FFmpegStage, "--commit", $Commit, "--sdist-dest", $Release
 )
+# Record the exact package versions that went into this build (usable with -Constraints).
+& $Py -m pip freeze --exclude-editable |
+    Where-Object { $_ -notmatch "^audio[-_]from[-_]video" } |
+    Set-Content -Path (Join-Path $Release "pip-freeze.txt") -Encoding ascii
 
 Write-Host "==> Quick check of the frozen command-line tool"
 Invoke-Checked (Join-Path $App "afv.exe") @("--version")

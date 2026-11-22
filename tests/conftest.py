@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_environment(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep every test away from the real user's config, cache, logs, and settings.
+
+    Points ``AFV_CONFIG_PATH`` at a file that does not exist yet and clears every other
+    ``AFV_*`` override. ``HOME`` and the XDG folders move to a temporary home, which
+    redirects the platformdirs cache and log folders (and Qt settings) on macOS and
+    Linux. Subprocesses inherit the same environment. Tests that need a specific value
+    still set it themselves.
+    """
+    home = tmp_path_factory.mktemp("home")
+    for name in [key for key in os.environ if key.startswith("AFV_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("AFV_CONFIG_PATH", str(home / "config.toml"))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / ".cache"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
 
 
 def _find_ffmpeg() -> str:

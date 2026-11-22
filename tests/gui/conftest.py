@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from typing import Any
 
 import pytest
@@ -45,3 +46,28 @@ def _block_real_http_requests(monkeypatch: pytest.MonkeyPatch) -> None:
         "handle_async_request",
         _forbid_real_http_request,
     )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _platform_ui_font(qapp: Any, pytestconfig: pytest.Config) -> None:
+    """Give offscreen Qt on Windows the UI font that real Windows sessions use.
+
+    The offscreen platform plugin does not pick up the Windows system font, so
+    width-based layout tests would measure a substitute font instead. The native
+    Windows plugin uses the system message font, Segoe UI 9 pt. The fonts before and
+    after are written to the test log.
+    """
+    if sys.platform == "win32" and qapp.platformName() == "offscreen":
+        from PySide6.QtGui import QFont, QFontInfo
+
+        def describe(font: QFont) -> str:
+            info = QFontInfo(font)
+            return (
+                f"{font.family()} {font.pointSizeF():g}pt -> {info.family()} {info.pixelSize()}px"
+            )
+
+        before = describe(qapp.font())
+        qapp.setFont(QFont("Segoe UI", 9))
+        reporter = pytestconfig.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line(f"offscreen UI font: {before}; using {describe(qapp.font())}")
