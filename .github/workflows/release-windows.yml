@@ -1,0 +1,56 @@
+name: Windows installer
+
+# Builds the Windows installer (with FFmpeg bundled), smoke-tests it on a clean
+# runner, and uploads the results as a workflow artifact. It never publishes a
+# GitHub Release; download the artifact from the workflow run page instead.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and smoke-test (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup --no-progress -y }
+
+      - name: Cache FFmpeg download
+        uses: actions/cache@v4
+        with:
+          path: build/windows/cache
+          key: ffmpeg-${{ hashFiles('packaging/ffmpeg-manifest.toml') }}
+
+      - name: Build installer
+        shell: pwsh
+        run: ./packaging/build_windows.ps1 -Python python
+
+      - name: Smoke-test installer
+        shell: pwsh
+        run: ./packaging/windows/smoke_test.ps1
+
+      - name: Upload installer and release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-from-video-windows-x64
+          path: build/windows/release/
+          if-no-files-found: error
+          retention-days: 30

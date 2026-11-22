@@ -35,6 +35,7 @@ afv ./videos/
 - [Exit codes](#exit-codes)
 - [Caveats](#caveats)
 - [Development](#development)
+- [Building the Windows installer](#building-the-windows-installer)
 - [License](#license)
 
 ## Requirements
@@ -396,6 +397,9 @@ on_conflict = "skip"      # Or "overwrite" or "rename".
 Environment variables override the file: `AFV_MB_CONTACT`, `AFV_MB_USER_AGENT`,
 `AFV_OUTPUT_DIR`, `AFV_FFMPEG_PATH`, and `AFV_FFPROBE_PATH`. Command-line options override both.
 
+FFmpeg is found in this order: `AFV_FFMPEG_PATH` / `AFV_FFPROBE_PATH`, then `[binaries]` in
+`config.toml`, then the copy bundled with the Windows installer (if any), then `PATH`.
+
 ## Cache
 
 Online responses and processed cover art are cached in a small SQLite database, so re-running
@@ -455,6 +459,33 @@ pytest
 The tests generate small media files with FFmpeg and replay recorded MusicBrainz and iTunes
 responses, so they need FFmpeg but no network access or contact. CI runs on Ubuntu (Python 3.11
 and 3.15), macOS, and Windows.
+
+## Building the Windows installer
+
+The Windows installer bundles Python, Qt, FFmpeg, and FFprobe, so users don't install anything
+else. It installs per user (no admin rights) to `%LOCALAPPDATA%\Programs\Audio from Video`,
+adds a Start menu entry, and doesn't change `PATH`.
+
+**On GitHub (recommended):** run the **Windows installer** workflow from the Actions tab (or push
+a `v*` tag). It builds the installer, installs and tests it on a clean Windows machine, and
+uploads `AudioFromVideo-Setup-<version>-x64.exe` as a workflow artifact.
+
+**On a Windows PC** with 64-bit Python 3.11+ and [Inno Setup 6](https://jrsoftware.org/isinfo.php)
+(`winget install JRSoftware.InnoSetup`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+powershell -ExecutionPolicy Bypass -File packaging\windows\smoke_test.ps1   # optional
+```
+
+The installer and its release files land in `build\windows\release\`. The FFmpeg build is
+pinned by URL and SHA-256 in [`packaging/ffmpeg-manifest.toml`](packaging/ffmpeg-manifest.toml)
+(an LGPL build that includes the `libmp3lame` MP3 encoder). The build also writes license
+notices into the app's `licenses\` folder and saves the matching FFmpeg and app source
+archives next to the installer.
+
+Builds are not code-signed yet. On first launch, Windows SmartScreen shows "Windows protected
+your PC"; choose **More info**, then **Run anyway**.
 
 ## License
 

@@ -18,6 +18,34 @@ class MissingBinaryError(RuntimeError):
     """Raised when ffmpeg or ffprobe cannot be found or executed."""
 
 
+BUNDLED_DIR_ENV_VAR = "AFV_BUNDLED_FFMPEG_DIR"
+"""Developer override pointing at a folder laid out like a frozen app's ``ffmpeg/bin``."""
+
+
+def bundled_binary_dir(env: Mapping[str, str] | None = None) -> Path | None:
+    """Return the private FFmpeg ``bin`` folder shipped with a packaged app, if any.
+
+    A frozen build (PyInstaller sets ``sys.frozen``) looks for ``ffmpeg/bin`` next to
+    its executable. When running from source, ``AFV_BUNDLED_FFMPEG_DIR`` can point at
+    an equivalent folder for local testing. Returns ``None`` when no such folder exists.
+    """
+    active_env = os.environ if env is None else env
+    override = active_env.get(BUNDLED_DIR_ENV_VAR, "").strip()
+    if override:
+        candidate = Path(override).expanduser()
+    elif getattr(sys, "frozen", False):
+        candidate = Path(sys.executable).resolve().parent / "ffmpeg" / "bin"
+    else:
+        return None
+    return candidate if candidate.is_dir() else None
+
+
+def _bundled_candidate(name: str, bundled_dir: Path) -> Path:
+    """Return the expected path of ``name`` inside ``bundled_dir`` for this OS."""
+    filename = f"{name}.exe" if sys.platform.startswith("win") else name
+    return bundled_dir / filename
+
+
 @dataclass(frozen=True, slots=True)
 class BinaryResolution:
     """Resolution details for one external executable."""
@@ -48,7 +76,7 @@ def _resolve_single_binary(
     config_override: str | None,
     env: Mapping[str, str],
 ) -> BinaryResolution:
-    """Resolve one binary using precedence: env var -> config.toml -> PATH."""
+    """Resolve one binary using precedence: env var -> config.toml -> bundled -> PATH."""
     env_value = env.get(env_var, "").strip()
     if env_value:
         return _validate_explicit_path(name, env_value, source=f"env:{env_var}")
@@ -56,9 +84,29 @@ def _resolve_single_binary(
     if config_override is not None and config_override.strip():
         return _validate_explicit_path(name, config_override.strip(), source="config.toml")
 
+    bundled_dir = bundled_binary_dir(env)
+    if bundled_dir is not None:
+        bundled = _validate_explicit_path(
+            name, str(_bundled_candidate(name, bundled_dir)), source="bundled"
+        )
+        if bundled.found:
+            return bundled
+
     found = shutil.which(name, path=env.get("PATH"))
     if found:
         return BinaryResolution(name=name, path=Path(found), source="PATH")
+
+    if bundled_dir is not None:
+        # The app ships its own copy, but it is damaged and PATH has none either.
+        return BinaryResolution(
+            name=name,
+            path=None,
+            source="bundled",
+            error=(
+                f"The {name} bundled with the app is missing or damaged "
+                f"({_bundled_candidate(name, bundled_dir)}). Reinstall the app to restore it."
+            ),
+        )
 
     return BinaryResolution(
         name=name,

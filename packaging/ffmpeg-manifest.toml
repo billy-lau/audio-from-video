@@ -1,0 +1,26 @@
+# Pinned FFmpeg builds bundled into packaged releases of Audio from Video.
+#
+# Each table is one (OS, architecture) target. packaging/fetch_ffmpeg.py downloads
+# `url`, refuses to continue unless the SHA-256 matches `sha256`, and copies the
+# `bin/` folder and license into the app bundle.
+#
+# To update a pin:
+#   1. Pick a release at https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases
+#      (use a dated `autobuild-...` tag, never `latest`, so the URL stays stable).
+#   2. Use the LGPL *shared* variant (no GPL codecs; ffmpeg.exe and ffprobe.exe
+#      share one set of DLLs).
+#   3. Copy the asset URL and its SHA-256 (from checksums.sha256 or the asset page),
+#      and update `version`, `archive_root`, `source_commit`, and `build_recipe_url`.
+
+[windows-x64]
+version = "n9.0.2-61-gd59078794d"
+license = "LGPL-3.0-or-later"
+url = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-11-21-12-37/ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-shared-9.0.zip"
+sha256 = "499fa5e468f9ea6a4d38647f81f9ca4a9ac33655f30faf54b7a800ca9f4d6e5f"
+archive_root = "ffmpeg-n9.0.2-61-gd59078794d-win64-lgpl-shared-9.0"
+executables = ["ffmpeg.exe", "ffprobe.exe"]
+# FFmpeg source for this exact build (bundled next to the installer for LGPL compliance).
+source_commit = "d59078794d80f5256d5def27e10bb5400a13195c"
+source_url = "https://github.com/FFmpeg/FFmpeg/archive/d59078794d80f5256d5def27e10bb5400a13195c.tar.gz"
+# Build scripts, configure flags, and pinned versions of the third-party libraries.
+build_recipe_url = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/tag/autobuild-2026-11-21-12-37"

@@ -10,7 +10,9 @@ from pathlib import Path
 import pytest
 
 from audio_from_video.binaries import (
+    BUNDLED_DIR_ENV_VAR,
     MissingBinaryError,
+    bundled_binary_dir,
     format_install_instructions,
     get_binary_version,
     has_libmp3lame,
@@ -121,3 +123,115 @@ def test_real_installed_ffmpeg_and_ffprobe(ffmpeg_path: Path, ffprobe_path: Path
     assert get_binary_version(ffmpeg_path) is not None
     assert get_binary_version(ffprobe_path) is not None
     assert has_libmp3lame(ffmpeg_path) is True
+
+
+def _make_bundled_layout(root: Path) -> Path:
+    """Create a fake frozen-app layout ``<root>/ffmpeg/bin`` with both binaries."""
+    bin_dir = root / "ffmpeg" / "bin"
+    bin_dir.mkdir(parents=True)
+    ext = ".exe" if sys.platform == "win32" else ""
+    _make_fake_exe(bin_dir / f"ffmpeg{ext}")
+    _make_fake_exe(bin_dir / f"ffprobe{ext}")
+    return bin_dir
+
+
+def test_bundled_binary_dir_frozen_and_dev_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app_dir = tmp_path / "Audio from Video"
+    bin_dir = _make_bundled_layout(app_dir)
+
+    # Running from source with no override: no bundled folder.
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert bundled_binary_dir(env={}) is None
+
+    # Frozen app: ffmpeg/bin next to the executable.
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(app_dir / "Audio from Video.exe"))
+    assert bundled_binary_dir(env={}) == bin_dir.resolve()
+
+    # Frozen app whose ffmpeg folder was removed: None.
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "elsewhere" / "app.exe"))
+    assert bundled_binary_dir(env={}) is None
+
+    # Developer override works without freezing, and is ignored when it does not exist.
+    monkeypatch.delattr(sys, "frozen", raising=False)
+    assert bundled_binary_dir(env={BUNDLED_DIR_ENV_VAR: str(bin_dir)}) == bin_dir
+    assert bundled_binary_dir(env={BUNDLED_DIR_ENV_VAR: str(tmp_path / "nope")}) is None
+
+
+def test_bundled_precedence_between_config_and_path(tmp_path: Path) -> None:
+    ext = ".cmd" if sys.platform == "win32" else ""
+    bin_dir = _make_bundled_layout(tmp_path / "app")
+    path_dir = tmp_path / "path_bin"
+    path_dir.mkdir()
+    _make_fake_exe(path_dir / f"ffmpeg{ext}")
+    _make_fake_exe(path_dir / f"ffprobe{ext}")
+    cfg_ffmpeg = _make_fake_exe(tmp_path / f"cfg_ffmpeg{ext}")
+    cfg_ffprobe = _make_fake_exe(tmp_path / f"cfg_ffprobe{ext}")
+    env_ffmpeg = _make_fake_exe(tmp_path / f"env_ffmpeg{ext}")
+
+    base_env = {"PATH": str(path_dir), BUNDLED_DIR_ENV_VAR: str(bin_dir)}
+    if sys.platform == "win32":
+        base_env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+
+    # Bundled wins over PATH.
+    ffmpeg_res, ffprobe_res = inspect_binaries(config=AppConfig(), env=base_env)
+    assert ffmpeg_res.source == "bundled" and ffprobe_res.source == "bundled"
+    assert ffmpeg_res.path is not None and ffmpeg_res.path.parent == bin_dir.resolve()
+    assert ffprobe_res.path is not None and ffprobe_res.path.parent == bin_dir.resolve()
+
+    # config.toml wins over bundled.
+    cfg = AppConfig(
+        binaries=BinariesConfig(ffmpeg_path=str(cfg_ffmpeg), ffprobe_path=str(cfg_ffprobe))
+    )
+    ffmpeg_res, ffprobe_res = inspect_binaries(config=cfg, env=base_env)
+    assert ffmpeg_res.source == "config.toml" and ffprobe_res.source == "config.toml"
+
+    # The env var wins over everything, per binary.
+    ffmpeg_res, ffprobe_res = inspect_binaries(
+        config=AppConfig(), env={**base_env, "AFV_FFMPEG_PATH": str(env_ffmpeg)}
+    )
+    assert ffmpeg_res.source == "env:AFV_FFMPEG_PATH"
+    assert ffprobe_res.source == "bundled"
+
+
+def test_damaged_bundled_copy_falls_back_to_path_then_reports_reinstall(
+    tmp_path: Path,
+) -> None:
+    ext = ".cmd" if sys.platform == "win32" else ""
+    bin_dir = tmp_path / "app" / "ffmpeg" / "bin"
+    bin_dir.mkdir(parents=True)  # Folder exists, but both binaries are missing.
+    path_dir = tmp_path / "path_bin"
+    path_dir.mkdir()
+    _make_fake_exe(path_dir / f"ffmpeg{ext}")
+
+    env = {"PATH": str(path_dir), BUNDLED_DIR_ENV_VAR: str(bin_dir)}
+    if sys.platform == "win32":
+        env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
+    ffmpeg_res, ffprobe_res = inspect_binaries(config=AppConfig(), env=env)
+
+    # ffmpeg falls through to PATH.
+    assert ffmpeg_res.found and ffmpeg_res.source == "PATH"
+    # ffprobe is nowhere: the error points at the damaged bundled copy.
+    assert not ffprobe_res.found
+    assert ffprobe_res.source == "bundled"
+    assert "Reinstall the app" in (ffprobe_res.error or "")
+
+
+def test_bundled_lookup_uses_exe_names_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "ffmpeg" / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "ffmpeg.exe").write_bytes(b"MZ")
+    (bin_dir / "ffprobe.exe").write_bytes(b"MZ")
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(os, "access", lambda *_args, **_kwargs: True)
+
+    ffmpeg_res, ffprobe_res = inspect_binaries(
+        config=AppConfig(), env={"PATH": "", BUNDLED_DIR_ENV_VAR: str(bin_dir)}
+    )
+    assert ffmpeg_res.source == "bundled" and ffmpeg_res.path is not None
+    assert ffmpeg_res.path.name == "ffmpeg.exe"
+    assert ffprobe_res.path is not None and ffprobe_res.path.name == "ffprobe.exe"

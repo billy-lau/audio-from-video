@@ -572,6 +572,17 @@ def test_setup_screen_contact_validation_links_and_binaries(
     assert screen.ffmpeg_status.icon_name == "status_ok"
     assert screen.ffprobe_status.icon_name == "status_ok"
     assert screen.lame_status.icon_name == "status_ok"
+    assert "(PATH)" in screen.ffmpeg_status.text
+
+    # The copy shipped inside a packaged app is described in plain words.
+    bundled_status = BinariesStatus(
+        ffmpeg=BinaryResolution("ffmpeg", Path("/app/ffmpeg/bin/ffmpeg.exe"), "bundled"),
+        ffprobe=BinaryResolution("ffprobe", Path("/app/ffmpeg/bin/ffprobe.exe"), "bundled"),
+        has_libmp3lame=True,
+    )
+    ctrl.binaries_status.emit(bundled_status)
+    assert "(bundled with the app)" in screen.ffmpeg_status.text
+    assert "(bundled with the app)" in screen.ffprobe_status.text
 
     # Browse for ffmpeg calls set_ffmpeg_path().
     monkeypatch.setattr(

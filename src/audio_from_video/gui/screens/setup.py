@@ -69,6 +69,11 @@ def _needs_env_fallback_hint(message: str) -> bool:
     return any(hint in lowered for hint in _WRITE_ERROR_HINTS)
 
 
+def _source_label(source: str) -> str:
+    """Return user-facing wording for a binary resolution source."""
+    return "bundled with the app" if source == "bundled" else source
+
+
 class SetupScreen(QWidget):
     """Setup screen widget (listens to ``binaries_status`` and ``setup_error``)."""
 
@@ -543,7 +548,7 @@ class SetupScreen(QWidget):
         self._last_binaries_status = status
         ffmpeg = status.ffmpeg
         if ffmpeg.found and ffmpeg.path is not None:
-            msg = f"FFmpeg found ({ffmpeg.source}): {ffmpeg.path}"
+            msg = f"FFmpeg found ({_source_label(ffmpeg.source)}): {ffmpeg.path}"
             self.ffmpeg_status.set_status("status_ok", msg)
             self.ffmpeg_status.setToolTip(str(ffmpeg.path))
         else:
@@ -554,7 +559,7 @@ class SetupScreen(QWidget):
 
         ffprobe = status.ffprobe
         if ffprobe.found and ffprobe.path is not None:
-            msg = f"FFprobe found ({ffprobe.source}): {ffprobe.path}"
+            msg = f"FFprobe found ({_source_label(ffprobe.source)}): {ffprobe.path}"
             self.ffprobe_status.set_status("status_ok", msg)
             self.ffprobe_status.setToolTip(str(ffprobe.path))
         else:
